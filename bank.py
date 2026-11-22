@@ -25,6 +25,13 @@ MAX_DEPOSIT = 1000000.0        # max single deposit
 MAX_ATTEMPTS = 3               # wrong PINs before lock
 LOCK_SECONDS = 300             # lock time (5 minutes)
 INTEREST_RATE = 4.0            # yearly % for Savings accounts
+SECURITY_QUESTIONS = [
+    "What is your pet's name?",
+    "What is your mother's maiden name?",
+    "What was your first school?",
+    "What is your favourite teacher's name?",
+    "In which city were you born?",
+]
 MONEY_IN = ("Opening Deposit", "Deposit", "Transfer In", "Interest")
 MONEY_OUT = ("Withdraw", "Transfer Out")
 
@@ -53,7 +60,8 @@ class Account:
 
     def __init__(self, acc_no, name, username, acc_type, salt, pin_hash,
                  balance=0.0, status="active", history=None,
-                 failed_attempts=0, locked_until=0.0, created=""):
+                 failed_attempts=0, locked_until=0.0, created="",
+                 sec_question="", sec_salt="", sec_hash=""):
         self.acc_no = acc_no
         self.name = name
         self.username = username
@@ -66,6 +74,9 @@ class Account:
         self.failed_attempts = failed_attempts
         self.locked_until = locked_until
         self.created = created
+        self.sec_question = sec_question   # security question for forgot PIN
+        self.sec_salt = sec_salt
+        self.sec_hash = sec_hash
 
     # ---------- saving / loading ----------
     @classmethod
@@ -83,6 +94,9 @@ class Account:
             failed_attempts=int(d.get("failed_attempts", 0)),
             locked_until=float(d.get("locked_until", 0)),
             created=d.get("created", ""),
+            sec_question=d.get("sec_question", ""),
+            sec_salt=d.get("sec_salt", ""),
+            sec_hash=d.get("sec_hash", ""),
         )
 
     def to_dict(self):
@@ -98,6 +112,9 @@ class Account:
             "failed_attempts": self.failed_attempts,
             "locked_until": self.locked_until,
             "created": self.created,
+            "sec_question": self.sec_question,
+            "sec_salt": self.sec_salt,
+            "sec_hash": self.sec_hash,
         }
 
     # ---------- PIN security ----------
@@ -135,6 +152,26 @@ class Account:
     def unlock(self):
         self.failed_attempts = 0
         self.locked_until = 0.0
+
+    # ---------- security question (forgot PIN) ----------
+    def _hash_answer(self, answer):
+        cleaned = " ".join(answer.lower().split())
+        return hashlib.pbkdf2_hmac(
+            "sha256", cleaned.encode(), self.sec_salt.encode(), 100_000
+        ).hex()
+
+    def has_security(self):
+        return bool(self.sec_question and self.sec_hash)
+
+    def set_security(self, question, answer):
+        self.sec_question = question
+        self.sec_salt = os.urandom(8).hex()
+        self.sec_hash = self._hash_answer(answer)
+
+    def check_answer(self, answer):
+        if not self.has_security():
+            return False
+        return hmac.compare_digest(self.sec_hash, self._hash_answer(answer))
 
     # ---------- helpers ----------
     def min_balance(self):
@@ -287,7 +324,8 @@ class Bank:
         return None
 
     # ---------- create / delete ----------
-    def create_account(self, name, username, acc_type, pin, confirm_pin, opening):
+    def create_account(self, name, username, acc_type, pin, confirm_pin, opening,
+                       question, answer):
         name = " ".join(name.split())
         username = username.strip()
         opening = round(float(opening), 2)
@@ -301,6 +339,10 @@ class Bank:
             return False, "PIN must be 4 to 8 digits", None
         if pin != confirm_pin:
             return False, "PINs do not match", None
+        if question not in SECURITY_QUESTIONS:
+            return False, "Please choose a security question", None
+        if len(answer.strip()) < 3:
+            return False, "Security answer must be at least 3 characters", None
         minimum = MIN_BALANCE[acc_type]
         if opening < minimum:
             return False, f"{acc_type} account needs at least {money(minimum)} to open", None
@@ -312,6 +354,7 @@ class Bank:
         acc = Account(acc_no, name, username, acc_type, "", "",
                       created=datetime.now().strftime("%Y-%m-%d"))
         acc.set_pin(pin)
+        acc.set_security(question, answer)
         acc.balance = opening
         if opening > 0:
             acc._log("Opening Deposit", opening)
@@ -346,6 +389,32 @@ class Bank:
         if locked:
             return None, "Too many wrong attempts. Account locked for 5 minutes."
         return None, generic
+
+    def reset_pin_with_answer(self, identifier, answer, new_pin, confirm_pin):
+        generic = "Details are incorrect. If you did not set a security question, contact the admin."
+        acc = self.find(identifier)
+        if acc is None or not acc.has_security():
+            return False, generic
+        left = acc.lock_seconds_left()
+        if left:
+            return False, f"Too many wrong attempts. Try again in {left // 60 + 1} minute(s)."
+        if not acc.check_answer(answer):
+            locked = acc.register_failure()
+            if locked:
+                self.log("system", f"Account {acc.acc_no} locked after wrong security answers")
+            self.save()
+            if locked:
+                return False, "Too many wrong attempts. Account locked for 5 minutes."
+            return False, generic
+        if not valid_pin(new_pin):
+            return False, "PIN must be 4 to 8 digits"
+        if new_pin != confirm_pin:
+            return False, "PINs do not match"
+        acc.set_pin(new_pin)
+        acc.unlock()
+        self.log(acc.acc_no, "PIN reset using security question")
+        self.save()
+        return True, "PIN reset done. You can log in with your new PIN now."
 
     def admin_login(self, password, real_password):
         if not real_password:
@@ -470,7 +539,7 @@ def rows_to_csv(rows):
 #                               PAGES
 # =====================================================================
 def login_page(bank):
-    tab_login, tab_create = st.tabs(["Login", "Create account"])
+    tab_login, tab_create, tab_forgot = st.tabs(["Login", "Create account", "Forgot PIN"])
 
     with tab_login:
         with st.form("login_form"):
@@ -503,6 +572,8 @@ def login_page(bank):
             acc_type = st.selectbox("Account type", ["Savings", "Current"])
             new_pin = st.text_input("PIN (4-8 digits)*", type="password")
             confirm_pin = st.text_input("Confirm PIN*", type="password")
+            question = st.selectbox("Security question (for forgot PIN)", SECURITY_QUESTIONS)
+            answer = st.text_input("Security answer*")
             opening = st.number_input("Opening deposit", min_value=0.0, step=100.0)
             go = st.form_submit_button("Create account")
         st.caption(
@@ -511,13 +582,38 @@ def login_page(bank):
         )
         if go:
             ok, message, acc = bank.create_account(
-                name, username, acc_type, new_pin, confirm_pin, opening
+                name, username, acc_type, new_pin, confirm_pin, opening, question, answer
             )
             if ok:
                 st.success(f"Account created! Account number: {acc.acc_no}")
                 st.info(f"You can log in with your username ({acc.username}) or the account number.")
             else:
                 st.error(message)
+
+    with tab_forgot:
+        st.write("Forgot your PIN? Answer your security question to set a new one.")
+        if st.session_state.pop("clear_forgot", False):
+            st.session_state["forgot_id"] = ""
+        forgot_id = st.text_input("Username or account number", key="forgot_id").strip()
+        target = bank.find(forgot_id) if forgot_id else None
+        if forgot_id:
+            if target and target.has_security():
+                st.info(f"Security question: {target.sec_question}")
+            else:
+                st.warning("Account not found, or no security question was set. "
+                           "Please contact the admin to reset your PIN.")
+        with st.form("forgot_form"):
+            answer = st.text_input("Your answer")
+            new_pin = st.text_input("New PIN (4-8 digits)", type="password")
+            confirm = st.text_input("Confirm new PIN", type="password")
+            go = st.form_submit_button("Reset PIN")
+        if go:
+            ok, message = bank.reset_pin_with_answer(forgot_id, answer, new_pin, confirm)
+            if ok:
+                st.session_state["clear_forgot"] = True
+                flash("success", message)
+                st.rerun()
+            st.error(message)
 
 
 def user_page(bank, acc):
@@ -621,6 +717,26 @@ def user_page(bank, acc):
                 acc.set_pin(new_pin)
                 bank.log(acc.acc_no, "PIN changed")
                 finish(bank, (True, "PIN changed successfully"))
+
+        st.markdown("##### Security question (for forgot PIN)")
+        if acc.has_security():
+            st.caption(f"Current question: {acc.sec_question}")
+        else:
+            st.warning("No security question set yet. Set one so you can reset a forgotten PIN.")
+        with st.form("security_form", clear_on_submit=True):
+            question = st.selectbox("Question", SECURITY_QUESTIONS)
+            answer = st.text_input("Answer")
+            pin_check = st.text_input("Enter your PIN to confirm", type="password")
+            go = st.form_submit_button("Save security question")
+        if go:
+            if not acc.check_pin(pin_check):
+                st.error("Incorrect PIN")
+            elif len(answer.strip()) < 3:
+                st.error("Answer must be at least 3 characters")
+            else:
+                acc.set_security(question, answer)
+                bank.log(acc.acc_no, "Security question updated")
+                finish(bank, (True, "Security question saved"))
 
         st.markdown("##### Close account")
         st.warning(
