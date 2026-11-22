@@ -655,7 +655,7 @@ def balance_card(acc):
 
 def render_footer():
     st.markdown(
-        '<div class="nv-footer">NovaVault Bank &bull;Streamlit</div>',
+        '<div class="nv-footer">NovaVault Bank &bull</div>',
         unsafe_allow_html=True,
     )
 
