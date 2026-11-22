@@ -1,5 +1,5 @@
 """
-NovaVault Bank - Bank Account Management System
+NovaVault Bank - Bank Account Management System 
 
 Project scope used: functions, loops, if/else, file handling,
 classes and objects.
@@ -493,6 +493,11 @@ NV_CSS = """<style>
 @keyframes nvSplash { 0%,65%{opacity:1; visibility:visible} 100%{opacity:0; visibility:hidden} }
 @keyframes nvPop { 0%{transform:scale(.6); opacity:0} 60%{transform:scale(1.08); opacity:1} 100%{transform:scale(1)} }
 @keyframes nvShine { 0%{left:-70%} 100%{left:140%} }
+@keyframes nvGlow { 0%,100%{box-shadow:0 16px 36px rgba(79,70,229,.38), 0 0 0 rgba(168,85,247,0)} 50%{box-shadow:0 20px 48px rgba(124,58,237,.55), 0 0 38px rgba(219,39,119,.35)} }
+@keyframes nvHolo { 0%{filter:hue-rotate(0deg)} 100%{filter:hue-rotate(360deg)} }
+@keyframes nvOrb { 0%,100%{transform:translate(0,0) scale(1)} 50%{transform:translate(4%,6%) scale(1.15)} }
+@keyframes nvIce { 0%,100%{opacity:.55} 50%{opacity:.9} }
+@keyframes nvText { to{background-position:200% center} }
 
 .block-container { padding-top: 2rem; max-width: 900px; }
 footer { visibility: hidden; }
@@ -545,23 +550,6 @@ footer { visibility: hidden; }
 }
 .nv-compact span { opacity: .8; }
 
-.nv-card {
-  position: relative; overflow: hidden; color: #fff; border-radius: 24px; padding: 1.4rem 1.6rem;
-  margin: .6rem 0 1rem; font-family: 'Poppins', sans-serif;
-  background: linear-gradient(135deg, #4f46e5, #7c3aed 55%, #db2777);
-  box-shadow: 0 16px 36px rgba(79, 70, 229, .38); animation: nvFadeUp .6s ease both;
-}
-.nv-card.frozen { background: linear-gradient(135deg, #475569, #64748b); box-shadow: 0 16px 36px rgba(71,85,105,.35); }
-.nv-card::after {
-  content: ""; position: absolute; top: 0; left: -70%; width: 40%; height: 100%;
-  background: linear-gradient(120deg, transparent, rgba(255,255,255,.28), transparent);
-  transform: skewX(-20deg); animation: nvShine 4.5s ease-in-out infinite;
-}
-.nv-card .top { display: flex; justify-content: space-between; align-items: center; font-size: .85rem; opacity: .9; letter-spacing: 1px; }
-.nv-card .label { margin-top: 1rem; font-size: .8rem; opacity: .8; }
-.nv-card .balance { font-size: clamp(1.8rem, 6vw, 2.6rem); font-weight: 800; margin: .1rem 0 1rem; }
-.nv-card .bottom { display: flex; justify-content: space-between; gap: 1rem; flex-wrap: wrap; font-weight: 600; letter-spacing: 1px; }
-.nv-card .bottom small { font-weight: 400; opacity: .75; font-size: .68rem; }
 
 [data-testid="stMetric"] {
   border: 1px solid rgba(128,128,128,.25); background: rgba(128,128,128,.07);
@@ -589,6 +577,70 @@ footer { visibility: hidden; }
 }
 
 .nv-footer { text-align: center; opacity: .6; font-size: .8rem; margin-top: 2.2rem; font-family: 'Poppins', sans-serif; }
+/* ---- balance card: native Streamlit containers styled with CSS only ---- */
+.st-key-nvstack { position: relative; perspective: 1100px; margin: .8rem 0 2.4rem; }
+.st-key-nvstack::before, .st-key-nvstack::after {
+  content: ""; position: absolute; left: 5%; right: 5%; top: 0; bottom: 0; border-radius: 24px;
+  transition: transform .45s cubic-bezier(.2,.8,.2,1);
+}
+.st-key-nvstack::before { background: linear-gradient(135deg, #0891b2, #6366f1); opacity: .45; transform: translateY(14px) scale(.94); }
+.st-key-nvstack::after  { background: linear-gradient(135deg, #db2777, #7c3aed); opacity: .28; transform: translateY(26px) scale(.88); z-index: -1; }
+.st-key-nvstack:hover::before { transform: translateY(20px) scale(.95); }
+.st-key-nvstack:hover::after  { transform: translateY(38px) scale(.9); }
+
+[class*="st-key-nvcard_"] {
+  position: relative; z-index: 1; overflow: hidden; border-radius: 24px; padding: 1.4rem 1.6rem; gap: .2rem;
+  background:
+    linear-gradient(135deg, #fde68a, #f59e0b 60%, #fde68a) 1.6rem 3.3rem / 38px 28px no-repeat,
+    linear-gradient(135deg, #4f46e5, #7c3aed 55%, #db2777);
+  transform-style: preserve-3d; transition: transform .45s cubic-bezier(.2,.8,.2,1);
+  animation: nvFadeUp .6s ease both, nvGlow 4s ease-in-out infinite;
+}
+.st-key-nvstack:hover [class*="st-key-nvcard_"] { transform: rotateX(5deg) rotateY(-7deg) translateY(-4px); }
+[class*="st-key-nvcard_"] * { color: #fff !important; font-family: 'Poppins', sans-serif; }
+[class*="st-key-nvcard_"] > * { position: relative; z-index: 2; }
+[class*="st-key-nvcard_"] h2 { font-size: clamp(1.8rem, 6vw, 2.6rem); font-weight: 800; padding: 0; margin: 0 0 .6rem; transition: filter .35s ease; }
+[class*="st-key-nvcard_"] [data-testid="stCaptionContainer"] { opacity: .8; }
+[class*="st-key-nvcard_"] a { display: none; }
+[class*="st-key-nvcard_"]::before {          /* holographic sheen */
+  content: ""; position: absolute; inset: 0; pointer-events: none; mix-blend-mode: overlay; opacity: .35;
+  background: conic-gradient(from 210deg at 80% 20%, #fde68a, #a5f3fc, #f0abfc, #fde68a);
+  animation: nvHolo 9s linear infinite;
+}
+[class*="st-key-nvcard_"]::after {           /* moving shine */
+  content: ""; position: absolute; top: 0; left: -70%; width: 40%; height: 100%; pointer-events: none;
+  background: linear-gradient(120deg, transparent, rgba(255,255,255,.28), transparent);
+  transform: skewX(-20deg); animation: nvShine 4.5s ease-in-out infinite;
+}
+[class*="st-key-nvcard_"][class*="_hide"] h2 { filter: blur(11px); user-select: none; }
+[class*="st-key-nvcard_frozen_"] {
+  background: linear-gradient(135deg, #475569, #64748b); animation: nvFadeUp .6s ease both;
+}
+[class*="st-key-nvcard_frozen_"]::before {
+  mix-blend-mode: normal; opacity: .55; animation: nvIce 3s ease-in-out infinite;
+  background: linear-gradient(160deg, rgba(255,255,255,.35), rgba(186,230,253,.12) 45%, rgba(255,255,255,.3));
+}
+[class*="st-key-nvcard_frozen_"]::after { animation-duration: 9s; }
+
+/* ---- ambient glow, tabs, footer ---- */
+.stApp::before {
+  content: ""; position: fixed; inset: -10%; z-index: 0; pointer-events: none; opacity: .16;
+  background:
+    radial-gradient(circle at 15% 20%, #6d28d9 0, transparent 38%),
+    radial-gradient(circle at 85% 75%, #0891b2 0, transparent 40%),
+    radial-gradient(circle at 70% 10%, #db2777 0, transparent 30%);
+  animation: nvOrb 16s ease-in-out infinite;
+}
+.stTabs [data-baseweb="tab-highlight"] { background: linear-gradient(90deg, #6366f1, #db2777); box-shadow: 0 0 12px rgba(139,92,246,.7); height: 3px; }
+[data-testid="stColumn"]:nth-child(2) [data-testid="stMetric"] { animation-delay: .12s; }
+.nv-footer {
+  background: linear-gradient(90deg, #888, #8b5cf6, #0891b2, #888); background-size: 200% auto;
+  -webkit-background-clip: text; background-clip: text; color: transparent; opacity: .85;
+  animation: nvText 6s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}
 </style>"""
 
 SPLASH_HTML = (
@@ -636,26 +688,41 @@ def render_header(logged_in):
     )
 
 
-def balance_card(acc):
-    """Credit-card style balance box. Names are escaped because they come from users."""
+def md_safe(text):
+    """Escape markdown characters, because names come from users."""
+    return re.sub(r"([\\`*_{}\[\]()#+\-.!|<>~$])", r"\\\1", str(text))
+
+
+def box(key):
+    """A container with a CSS class (st-key-<key>); older Streamlit has no key."""
+    try:
+        return st.container(key=key)
+    except TypeError:
+        return st.container()
+
+
+def balance_card(acc, hide=False):
+    """Credit-card style balance box built from Streamlit containers, styled only by CSS."""
     number = f"{acc.acc_no[:4]} {acc.acc_no[4:]}"
-    frozen = " frozen" if acc.status != "active" else ""
+    frozen = acc.status != "active"
     state = "FROZEN" if frozen else "ACTIVE"
-    return (
-        f'<div class="nv-card{frozen}">'
-        f'<div class="top"><span>{html.escape(acc.acc_type.upper())} ACCOUNT</span><span>● {state}</span></div>'
-        '<div class="label">Available balance</div>'
-        f'<div class="balance">{money(acc.balance)}</div>'
-        '<div class="bottom">'
-        f'<div><small>ACCOUNT NO.</small><br>{number}</div>'
-        f'<div><small>HOLDER</small><br>{html.escape(acc.name.upper())}</div>'
-        '</div></div>'
-    )
+    key = f"nvcard_{'frozen' if frozen else 'active'}_{'hide' if hide else 'show'}"
+    with box("nvstack"):
+        with box(key):
+            st.markdown(f"**{md_safe(acc.acc_type.upper())} ACCOUNT** · ● {state}")
+            st.caption("")
+            st.caption("Available balance")
+            st.markdown(f"## {money(acc.balance)}")
+            c1, c2 = st.columns(2)
+            c1.caption("ACCOUNT NO.")
+            c1.markdown(f"**{number}**")
+            c2.caption("HOLDER")
+            c2.markdown(f"**{md_safe(acc.name.upper())}**")
 
 
 def render_footer():
     st.markdown(
-        '<div class="nv-footer">NovaVault Bank &bull</div>',
+        '<div class="nv-footer">NovaVault Bank &bull; Built with Python &amp; Streamlit</div>',
         unsafe_allow_html=True,
     )
 
@@ -668,7 +735,10 @@ def flash(kind, message):
 def show_flash():
     item = st.session_state.pop("flash", None)
     if item:
-        getattr(st, item[0])(item[1])
+        if item[0] == "success" and hasattr(st, "toast"):
+            st.toast(item[1], icon="✅")
+        else:
+            getattr(st, item[0])(item[1])
 
 
 def logout():
@@ -800,7 +870,10 @@ def user_page(bank, acc):
 
     if acc.status != "active":
         st.error("Your account is frozen. Please contact the admin.")
-    st.markdown(balance_card(acc), unsafe_allow_html=True)
+    hide = False
+    if hasattr(st, "toggle"):
+        hide = st.toggle("🙈 Hide balance", key="hide_balance")
+    balance_card(acc, hide)
     st.caption(f"Username: {acc.username or '-'}")
 
     m1, m2 = st.columns(2)
