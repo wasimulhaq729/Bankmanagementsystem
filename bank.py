@@ -3,6 +3,11 @@ NovaVault Bank - Bank Account Management System
 
 Project scope used: functions, loops, if/else, file handling,
 classes and objects.
+
+Features: login with lockout, deposit / withdraw / transfer with PIN
+confirmation, transaction reference numbers, saved payees, statement with
+filters, charts and PDF / CSV download, savings interest, admin console,
+backup / restore, auto logout after 10 minutes.
 """
 import csv
 import hashlib
@@ -26,6 +31,7 @@ MAX_DEPOSIT = 1000000.0        # max single deposit
 MAX_ATTEMPTS = 3               # wrong PINs before lock
 LOCK_SECONDS = 300             # lock time (5 minutes)
 INTEREST_RATE = 4.0            # yearly % for Savings accounts
+SESSION_TIMEOUT = 600        # auto logout after 10 minutes without activity
 SECURITY_QUESTIONS = [
     "What is your pet's name?",
     "What is your mother's maiden name?",
@@ -45,6 +51,11 @@ def valid_pin(pin):
     return pin.isdigit() and 4 <= len(pin) <= 8
 
 
+def new_ref():
+    """Short unique reference number for every transaction."""
+    return "TXN" + os.urandom(4).hex().upper()
+
+
 def get_admin_password():
     """Admin password comes from Streamlit secrets or an environment variable."""
     try:
@@ -62,7 +73,7 @@ class Account:
     def __init__(self, acc_no, name, username, acc_type, salt, pin_hash,
                  balance=0.0, status="active", history=None,
                  failed_attempts=0, locked_until=0.0, created="",
-                 sec_question="", sec_salt="", sec_hash=""):
+                 sec_question="", sec_salt="", sec_hash="", payees=None):
         self.acc_no = acc_no
         self.name = name
         self.username = username
@@ -78,6 +89,7 @@ class Account:
         self.sec_question = sec_question   # security question for forgot PIN
         self.sec_salt = sec_salt
         self.sec_hash = sec_hash
+        self.payees = payees if payees is not None else []   # saved receivers (account numbers)
 
     # ---------- saving / loading ----------
     @classmethod
@@ -98,6 +110,7 @@ class Account:
             sec_question=d.get("sec_question", ""),
             sec_salt=d.get("sec_salt", ""),
             sec_hash=d.get("sec_hash", ""),
+            payees=list(d.get("payees", [])),
         )
 
     def to_dict(self):
@@ -116,6 +129,7 @@ class Account:
             "sec_question": self.sec_question,
             "sec_salt": self.sec_salt,
             "sec_hash": self.sec_hash,
+            "payees": self.payees,
         }
 
     # ---------- PIN security ----------
@@ -178,8 +192,9 @@ class Account:
     def min_balance(self):
         return MIN_BALANCE.get(self.acc_type, 0.0)
 
-    def _log(self, kind, amount, note=""):
+    def _log(self, kind, amount, note="", ref=""):
         now = datetime.now()
+        ref = ref or new_ref()
         self.history.append({
             "date": now.strftime("%Y-%m-%d"),
             "time": now.strftime("%H:%M:%S"),
@@ -187,7 +202,9 @@ class Account:
             "amount": amount,
             "balance": self.balance,
             "note": note,
+            "ref": ref,
         })
+        return ref
 
     def today_out(self):
         """Total money that left this account today."""
@@ -223,8 +240,8 @@ class Account:
         if amount > MAX_DEPOSIT:
             return False, f"Maximum single deposit is {money(MAX_DEPOSIT)}"
         self.balance = round(self.balance + amount, 2)
-        self._log("Deposit", amount)
-        return True, f"Deposited {money(amount)}"
+        ref = self._log("Deposit", amount)
+        return True, f"Deposited {money(amount)} · Ref {ref}"
 
     def withdraw(self, amount):
         amount = round(float(amount), 2)
@@ -232,8 +249,8 @@ class Account:
         if error:
             return False, error
         self.balance = round(self.balance - amount, 2)
-        self._log("Withdraw", amount)
-        return True, f"Withdrew {money(amount)}"
+        ref = self._log("Withdraw", amount)
+        return True, f"Withdrew {money(amount)} · Ref {ref}"
 
     def send(self, other, amount, note=""):
         amount = round(float(amount), 2)
@@ -246,9 +263,10 @@ class Account:
             return False, error
         self.balance = round(self.balance - amount, 2)
         other.balance = round(other.balance + amount, 2)
-        self._log("Transfer Out", amount, f"To {other.name} ({other.acc_no}) {note}".strip())
-        other._log("Transfer In", amount, f"From {self.name} ({self.acc_no}) {note}".strip())
-        return True, f"Sent {money(amount)} to {other.name}"
+        ref = new_ref()
+        self._log("Transfer Out", amount, f"To {other.name} ({other.acc_no}) {note}".strip(), ref)
+        other._log("Transfer In", amount, f"From {self.name} ({self.acc_no}) {note}".strip(), ref)
+        return True, f"Sent {money(amount)} to {other.name} · Ref {ref}"
 
     def credit_interest(self, yearly_rate):
         interest = round(self.balance * yearly_rate / 100 / 12, 2)
@@ -390,6 +408,22 @@ class Bank:
         if locked:
             return None, "Too many wrong attempts. Account locked for 5 minutes."
         return None, generic
+
+    def verify_pin(self, acc, pin):
+        """Ask for the PIN again before money leaves the account. Wrong PINs count toward the lock."""
+        left = acc.lock_seconds_left()
+        if left:
+            return False, f"Too many wrong attempts. Try again in {left // 60 + 1} minute(s)."
+        if acc.check_pin(pin):
+            acc.failed_attempts = 0
+            return True, ""
+        locked = acc.register_failure()
+        if locked:
+            self.log("system", f"Account {acc.acc_no} locked after wrong PINs (payment)")
+        self.save()
+        if locked:
+            return False, "Too many wrong attempts. Account locked for 5 minutes."
+        return False, "Incorrect PIN"
 
     def reset_pin_with_answer(self, identifier, answer, new_pin, confirm_pin):
         generic = "Details are incorrect. If you did not set a security question, contact the admin."
@@ -563,9 +597,10 @@ footer { visibility: hidden; }
   background: rgba(128,128,128,.05); padding: 1.2rem; animation: nvFadeUp .6s ease both;
 }
 
-.stTabs [data-baseweb="tab-list"] { gap: 6px; }
-.stTabs [data-baseweb="tab"] { border-radius: 12px 12px 0 0; padding: 8px 16px; }
-.stTabs [aria-selected="true"] { background: rgba(99,102,241,.16); }
+.stTabs [data-baseweb="tab-list"] { gap: 8px; }
+.stTabs button[role="tab"] { border-radius: 999px !important; padding: 8px 18px; transition: background .2s; }
+.stTabs button[role="tab"]:hover { background: rgba(99,102,241,.10); }
+.stTabs button[aria-selected="true"] { background: rgba(99,102,241,.22); border-radius: 999px !important; }
 
 .stButton > button, [data-testid="stFormSubmitButton"] > button, [data-testid="stDownloadButton"] > button {
   background: linear-gradient(90deg, #6366f1, #8b5cf6); border: none; border-radius: 12px;
@@ -591,7 +626,7 @@ footer { visibility: hidden; }
 [class*="st-key-nvcard_"] {
   position: relative; z-index: 1; overflow: hidden; border-radius: 24px; padding: 1.4rem 1.6rem; gap: .2rem;
   background:
-    linear-gradient(135deg, #fde68a, #f59e0b 60%, #fde68a) 1.6rem 3.3rem / 38px 28px no-repeat,
+    url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' width='44' height='32' viewBox='0 0 44 32'><defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'><stop offset='0' stop-color='%23fde68a'/><stop offset='.55' stop-color='%23f59e0b'/><stop offset='1' stop-color='%23fde68a'/></linearGradient></defs><rect width='44' height='32' rx='7' fill='url(%23g)'/><path d='M0 11h14M0 21h14M30 11h14M30 21h14M14 0v32M30 0v32' stroke='%23b45309' stroke-opacity='.4' fill='none'/><rect x='14' y='9' width='16' height='14' rx='3' fill='none' stroke='%23b45309' stroke-opacity='.4'/></svg>") right 1.6rem top 1.4rem / 44px 32px no-repeat,
     linear-gradient(135deg, #4f46e5, #7c3aed 55%, #db2777);
   transform-style: preserve-3d; transition: transform .45s cubic-bezier(.2,.8,.2,1);
   animation: nvFadeUp .6s ease both, nvGlow 4s ease-in-out infinite;
@@ -631,7 +666,7 @@ footer { visibility: hidden; }
     radial-gradient(circle at 70% 10%, #db2777 0, transparent 30%);
   animation: nvOrb 16s ease-in-out infinite;
 }
-.stTabs [data-baseweb="tab-highlight"] { background: linear-gradient(90deg, #6366f1, #db2777); box-shadow: 0 0 12px rgba(139,92,246,.7); height: 3px; }
+.stTabs [data-baseweb="tab-highlight"] { display: none; }
 [data-testid="stColumn"]:nth-child(2) [data-testid="stMetric"] { animation-delay: .12s; }
 .nv-footer {
   background: linear-gradient(90deg, #888, #8b5cf6, #0891b2, #888); background-size: 200% auto;
@@ -722,7 +757,7 @@ def balance_card(acc, hide=False):
 
 def render_footer():
     st.markdown(
-        '<div class="nv-footer">NovaVault</div>',
+        '<div class="nv-footer">NovaVault Bank &bull; Built with Python &amp; Streamlit</div>',
         unsafe_allow_html=True,
     )
 
@@ -768,6 +803,7 @@ def history_rows(history):
             "Amount": h.get("amount", 0),
             "Balance": h.get("balance", 0),
             "Note": h.get("note", ""),
+            "Ref": h.get("ref", "-"),
         })
     return rows
 
@@ -775,10 +811,81 @@ def history_rows(history):
 def rows_to_csv(rows):
     buffer = io.StringIO()
     writer = csv.writer(buffer)
-    writer.writerow(["Date", "Time", "Type", "Amount", "Balance", "Note"])
+    writer.writerow(["Date", "Time", "Type", "Amount", "Balance", "Note", "Ref"])
     for r in rows:
-        writer.writerow([r["Date"], r["Time"], r["Type"], r["Amount"], r["Balance"], r["Note"]])
+        writer.writerow([r["Date"], r["Time"], r["Type"], r["Amount"], r["Balance"], r["Note"], r["Ref"]])
     return buffer.getvalue()
+
+
+def statement_pdf(acc, rows, start, end):
+    """Build a simple statement PDF by hand (no extra library needed)."""
+    def clean(text, width=None):
+        text = str(text).replace("₹", "Rs.").encode("latin-1", "replace").decode("latin-1")
+        text = text.replace("\\", "/").replace("(", "[").replace(")", "]")
+        return text[:width] if width else text
+
+    def num(v):
+        return f"{v:,.2f}"
+
+    head = [
+        ("B", 16, "NovaVault Bank"),
+        ("N", 10, "Account statement"),
+        ("N", 10, ""),
+        ("N", 10, f"Holder   : {clean(acc.name)}"),
+        ("N", 10, f"Account  : {acc.acc_no}  ({clean(acc.acc_type)})"),
+        ("N", 10, f"Period   : {start}  to  {end}"),
+        ("N", 10, f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}"),
+        ("N", 10, ""),
+        ("B", 9, f"{'Date':<10} {'Time':<8} {'Type':<13} {'Amount':>12} {'Balance':>12} {'Ref':<11} Note"),
+        ("N", 9, "-" * 94),
+    ]
+    body = []
+    for r in reversed(rows):                       # oldest first on paper
+        body.append(("N", 9, (
+            f"{clean(r['Date'], 10):<10} {clean(r['Time'], 8):<8} {clean(r['Type'], 13):<13} "
+            f"{num(r['Amount']):>12} {num(r['Balance']):>12} {clean(r['Ref'], 11):<11} {clean(r['Note'], 24)}"
+        )))
+    if not body:
+        body.append(("N", 9, "No transactions in this period."))
+    body.append(("N", 9, "-" * 94))
+    body.append(("N", 8, "This statement was generated by NovaVault Bank (demo project)."))
+
+    lines = head + body
+    per_page = 58
+    pages = [lines[i:i + per_page] for i in range(0, len(lines), per_page)]
+
+    objects = []                                    # index 0 -> object 1
+    objects.append("<< /Type /Catalog /Pages 2 0 R >>")
+    kids = " ".join(f"{5 + 2 * i} 0 R" for i in range(len(pages)))
+    objects.append(f"<< /Type /Pages /Kids [{kids}] /Count {len(pages)} >>")
+    objects.append("<< /Type /Font /Subtype /Type1 /BaseFont /Courier /Encoding /WinAnsiEncoding >>")
+    objects.append("<< /Type /Font /Subtype /Type1 /BaseFont /Courier-Bold /Encoding /WinAnsiEncoding >>")
+    for i, page in enumerate(pages):
+        y = 800
+        parts = []
+        for style, size, text in page:
+            font = "F2" if style == "B" else "F1"
+            parts.append(f"BT /{font} {size} Tf 40 {y} Td ({text}) Tj ET")
+            y -= size + 3.5 if size > 9 else 12
+        stream = "\n".join(parts)
+        objects.append(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] "
+            "/Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> "
+            f"/Contents {6 + 2 * i} 0 R >>"
+        )
+        objects.append(f"<< /Length {len(stream.encode('latin-1', 'replace'))} >>\nstream\n{stream}\nendstream")
+
+    out = bytearray(b"%PDF-1.4\n")
+    offsets = []
+    for n, body_text in enumerate(objects, start=1):
+        offsets.append(len(out))
+        out += f"{n} 0 obj\n".encode() + body_text.encode("latin-1", "replace") + b"\nendobj\n"
+    xref = len(out)
+    out += f"xref\n0 {len(objects) + 1}\n0000000000 65535 f \n".encode()
+    for off in offsets:
+        out += f"{off:010d} 00000 n \n".encode()
+    out += f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF".encode()
+    return bytes(out)
 
 
 # =====================================================================
@@ -862,6 +969,27 @@ def login_page(bank):
             st.error(message)
 
 
+def pick_payee():
+    """Callback: copy the chosen saved payee into the receiver box."""
+    st.session_state["transfer_to"] = st.session_state.get("payee_pick", "")
+
+
+def month_totals(rows):
+    """Money in / money out per month for the statement chart."""
+    months = sorted({r["Date"][:7] for r in rows if r["Date"] != "-"})
+    money_in = {m: 0.0 for m in months}
+    money_out = {m: 0.0 for m in months}
+    for r in rows:
+        month = r["Date"][:7]
+        if month not in money_in:
+            continue
+        if r["Type"] in MONEY_IN:
+            money_in[month] += r["Amount"]
+        elif r["Type"] in MONEY_OUT:
+            money_out[month] += r["Amount"]
+    return {"Money in": money_in, "Money out": money_out}
+
+
 def user_page(bank, acc):
     c1, c2 = st.columns([3, 1])
     c1.subheader(f"Welcome back, {acc.name} 👋")
@@ -875,6 +1003,11 @@ def user_page(bank, acc):
         hide = st.toggle("🙈 Hide balance", key="hide_balance")
     balance_card(acc, hide)
     st.caption(f"Username: {acc.username or '-'}")
+    if acc.acc_type == "Savings":
+        estimate = round(acc.balance * INTEREST_RATE / 100 / 12, 2)
+        st.caption(f"📈 Earns {INTEREST_RATE}% a year. Estimated interest next month: {money(estimate)}")
+    if acc.lock_seconds_left():
+        st.warning("Payments are paused for a few minutes after too many wrong PINs.")
 
     m1, m2 = st.columns(2)
     m1.metric("Daily limit left", money(max(DAILY_LIMIT - acc.today_out(), 0)))
@@ -886,7 +1019,7 @@ def user_page(bank, acc):
 
     with tab_dep:
         with st.form("deposit_form", clear_on_submit=True):
-            amount = st.number_input("Amount", min_value=0.0, step=100.0)
+            amount = st.number_input("Amount", min_value=0.0, max_value=MAX_DEPOSIT, step=100.0)
             go = st.form_submit_button("Deposit")
         if go:
             finish(bank, acc.deposit(amount))
@@ -894,13 +1027,28 @@ def user_page(bank, acc):
     with tab_wd:
         with st.form("withdraw_form", clear_on_submit=True):
             amount = st.number_input("Amount", min_value=0.0, step=100.0)
+            pin = st.text_input("Enter your PIN to confirm", type="password")
             go = st.form_submit_button("Withdraw")
         if go:
-            finish(bank, acc.withdraw(amount))
+            ok, error = bank.verify_pin(acc, pin)
+            if ok:
+                finish(bank, acc.withdraw(amount))
+            else:
+                st.error(error)
 
     with tab_tr:
+        payees = [no for no in acc.payees if no in bank.accounts]
         if st.session_state.pop("clear_transfer", False):
             st.session_state["transfer_to"] = ""
+            st.session_state["payee_pick"] = ""
+        if st.session_state.get("payee_pick", "") not in [""] + payees:
+            st.session_state["payee_pick"] = ""
+        if payees:
+            st.selectbox(
+                "Saved payees", [""] + payees, key="payee_pick", on_change=pick_payee,
+                format_func=lambda no: "Choose a saved payee" if not no
+                else f"{bank.accounts[no].name} ({no})",
+            )
         to_id = st.text_input("Receiver username or account number", key="transfer_to").strip()
         receiver = bank.find(to_id) if to_id else None
         if to_id:
@@ -913,42 +1061,92 @@ def user_page(bank, acc):
         with st.form("transfer_form", clear_on_submit=True):
             amount = st.number_input("Amount", min_value=0.0, step=100.0)
             note = st.text_input("Note (optional)", max_chars=60)
+            pin = st.text_input("Enter your PIN to confirm", type="password")
+            save_payee = st.checkbox("Save this receiver for next time")
             go = st.form_submit_button("Transfer")
         if go:
             if receiver is None:
                 st.error("Enter a valid receiver first")
             else:
-                result = acc.send(receiver, amount, note.strip())
-                if result[0]:
-                    st.session_state["clear_transfer"] = True
-                finish(bank, result)
+                ok, error = bank.verify_pin(acc, pin)
+                if not ok:
+                    st.error(error)
+                else:
+                    result = acc.send(receiver, amount, note.strip())
+                    if result[0]:
+                        st.session_state["clear_transfer"] = True
+                        if save_payee and receiver.acc_no not in acc.payees:
+                            acc.payees.append(receiver.acc_no)
+                    finish(bank, result)
 
     with tab_st:
-        kinds = ["All"] + sorted({h.get("type", "") for h in acc.history})
-        chosen = st.selectbox("Show", kinds)
-        rows = history_rows(acc.history)
-        if chosen != "All":
+        today = date.today()
+        first = min((h.get("date", today.isoformat()) for h in acc.history), default=today.isoformat())
+        try:
+            first_day = date.fromisoformat(first)
+        except ValueError:
+            first_day = today
+        f1, f2, f3 = st.columns(3)
+        start = f1.date_input("From", value=first_day, max_value=today)
+        end = f2.date_input("To", value=today, max_value=today)
+        kinds = [""] + sorted({h.get("type", "") for h in acc.history})
+        chosen = f3.selectbox("Type", kinds, format_func=lambda k: "All" if not k else k)
+        search = st.text_input("Search note or reference").strip().lower()
+
+        if start > end:
+            st.error("The 'From' date must be before the 'To' date")
+            rows = []
+        else:
+            rows = [r for r in history_rows(acc.history)
+                    if start.isoformat() <= r["Date"] <= end.isoformat()]
+        if chosen:
             rows = [r for r in rows if r["Type"] == chosen]
+        if search:
+            rows = [r for r in rows if search in f"{r['Note']} {r['Ref']}".lower()]
+
         total_in, total_out = 0.0, 0.0
         for r in rows:
             if r["Type"] in MONEY_IN:
                 total_in += r["Amount"]
             elif r["Type"] in MONEY_OUT:
                 total_out += r["Amount"]
-        s1, s2 = st.columns(2)
+        s1, s2, s3 = st.columns(3)
         s1.metric("Money in", money(total_in))
         s2.metric("Money out", money(total_out))
+        s3.metric("Transactions", len(rows))
         if rows:
             st.dataframe(rows)
-            st.download_button("Download statement (CSV)", rows_to_csv(rows),
+            if len(rows) > 1:
+                st.markdown("##### Money in and out by month")
+                st.bar_chart(month_totals(rows))
+                st.markdown("##### Balance trend")
+                st.line_chart({"Balance": [r["Balance"] for r in reversed(rows)]})
+            d1, d2 = st.columns(2)
+            d1.download_button("Download statement (PDF)",
+                               statement_pdf(acc, rows, start.isoformat(), end.isoformat()),
+                               file_name=f"statement_{acc.acc_no}.pdf", mime="application/pdf")
+            d2.download_button("Download statement (CSV)", rows_to_csv(rows),
                                file_name=f"statement_{acc.acc_no}.csv", mime="text/csv")
         else:
-            st.write("No transactions.")
+            st.info("No transactions for these filters.")
 
     with tab_pf:
         st.write(f"**Name:** {acc.name}")
+        st.write(f"**Username:** {acc.username or '-'}")
+        st.write(f"**Account number:** {acc.acc_no}")
         st.write(f"**Account type:** {acc.acc_type}")
         st.write(f"**Opened on:** {acc.created or '-'}")
+        st.write(f"**Status:** {acc.status.title()}")
+
+        saved = [no for no in acc.payees if no in bank.accounts]
+        if saved:
+            st.markdown("##### Saved payees")
+            with st.form("remove_payee_form", clear_on_submit=True):
+                gone = st.selectbox("Payee", saved, format_func=lambda no: f"{bank.accounts[no].name} ({no})")
+                go = st.form_submit_button("Remove payee")
+            if go:
+                acc.payees = [no for no in acc.payees if no != gone]
+                finish(bank, (True, "Payee removed"))
 
         st.markdown("##### Change PIN")
         with st.form("change_pin_form", clear_on_submit=True):
@@ -1145,6 +1343,15 @@ def main():
     if "user" not in st.session_state:
         st.session_state["user"] = None
         st.session_state["role"] = None
+
+    if st.session_state["user"] is None:
+        st.session_state.pop("last_active", None)
+    else:                                          # auto logout after a period of inactivity
+        now = time.time()
+        if now - st.session_state.get("last_active", now) > SESSION_TIMEOUT:
+            flash("info", "You were logged out after 10 minutes of inactivity.")
+            logout()
+        st.session_state["last_active"] = now
 
     bank = Bank()
     inject_css()
