@@ -1,5 +1,5 @@
 """
-Bank Account Management System
+NovaVault Bank - Bank Account Management System
 
 Project scope used: functions, loops, if/else, file handling,
 classes and objects.
@@ -7,6 +7,7 @@ classes and objects.
 import csv
 import hashlib
 import hmac
+import html
 import io
 import json
 import os
@@ -484,6 +485,181 @@ class Bank:
 # =====================================================================
 #                           SCREEN HELPERS
 # =====================================================================
+NV_CSS = """<style>
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;600;700;800&display=swap');
+@keyframes nvFadeUp { from {opacity:0; transform:translateY(18px);} to {opacity:1; transform:none;} }
+@keyframes nvGradient { 0%{background-position:0% 50%} 50%{background-position:100% 50%} 100%{background-position:0% 50%} }
+@keyframes nvFloat { 0%,100%{transform:translateY(0) rotate(0deg)} 50%{transform:translateY(-16px) rotate(8deg)} }
+@keyframes nvSplash { 0%,65%{opacity:1; visibility:visible} 100%{opacity:0; visibility:hidden} }
+@keyframes nvPop { 0%{transform:scale(.6); opacity:0} 60%{transform:scale(1.08); opacity:1} 100%{transform:scale(1)} }
+@keyframes nvShine { 0%{left:-70%} 100%{left:140%} }
+
+.block-container { padding-top: 2rem; max-width: 900px; }
+footer { visibility: hidden; }
+
+.nv-splash {
+  position: fixed; inset: 0; z-index: 99999; pointer-events: none;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  background: linear-gradient(135deg, #1e1b4b, #4c1d95, #0e7490);
+  color: #fff; font-family: 'Poppins', sans-serif;
+  animation: nvSplash 2.6s ease forwards;
+}
+.nv-splash .nv-logo { font-size: 4.5rem; animation: nvPop .9s ease both; }
+.nv-splash .nv-name { font-size: 2.2rem; font-weight: 800; letter-spacing: 3px; animation: nvFadeUp 1s ease .3s both; }
+.nv-splash .nv-sub { opacity: .8; animation: nvFadeUp 1s ease .6s both; }
+
+.nv-hero {
+  position: relative; overflow: hidden; text-align: center; color: #fff;
+  padding: 2.4rem 1rem 2rem; border-radius: 26px; margin-bottom: 1.2rem;
+  background: linear-gradient(135deg, #312e81, #6d28d9, #0891b2, #312e81);
+  background-size: 300% 300%;
+  animation: nvGradient 12s ease infinite, nvFadeUp .8s ease both;
+  box-shadow: 0 18px 40px rgba(76, 29, 149, .35);
+  font-family: 'Poppins', sans-serif;
+}
+.nv-hero .nv-badge {
+  display: inline-block; padding: 4px 14px; border-radius: 999px; font-size: .78rem;
+  background: rgba(255,255,255,.18); border: 1px solid rgba(255,255,255,.35); letter-spacing: 1px;
+}
+.nv-hero .nv-title { font-size: clamp(2.2rem, 7vw, 3.6rem); font-weight: 800; letter-spacing: 2px; margin: .5rem 0 0; line-height: 1.1; }
+.nv-hero .nv-title span { background: linear-gradient(90deg, #fde68a, #fff, #a5f3fc); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.nv-hero .nv-tag { opacity: .9; margin: .4rem 0 0; font-size: 1rem; }
+.nv-hero .nv-float { position: absolute; font-size: 1.8rem; opacity: .55; animation: nvFloat 6s ease-in-out infinite; }
+.nv-hero .f1 { left: 8%; top: 18%; }
+.nv-hero .f2 { right: 10%; top: 12%; animation-delay: 1.2s; }
+.nv-hero .f3 { left: 18%; bottom: 10%; animation-delay: 2.4s; }
+.nv-hero .f4 { right: 16%; bottom: 14%; animation-delay: 3.4s; }
+
+.nv-chips { display: flex; flex-wrap: wrap; gap: 10px; margin: 0 0 1rem; }
+.nv-chip2 {
+  flex: 1 1 170px; text-align: center; padding: .8rem 1rem; border-radius: 16px; font-size: .9rem;
+  border: 1px solid rgba(128,128,128,.25); background: rgba(128,128,128,.07);
+  animation: nvFadeUp .8s ease both; transition: transform .2s, box-shadow .2s;
+}
+.nv-chip2:hover { transform: translateY(-5px); box-shadow: 0 10px 22px rgba(99,102,241,.25); }
+
+.nv-compact {
+  font-family: 'Poppins', sans-serif; font-size: 1.15rem; padding: .55rem 1rem; border-radius: 14px;
+  margin-bottom: .8rem; color: #fff; animation: nvFadeUp .5s ease both;
+  background: linear-gradient(90deg, #312e81, #6d28d9, #0891b2);
+}
+.nv-compact span { opacity: .8; }
+
+.nv-card {
+  position: relative; overflow: hidden; color: #fff; border-radius: 24px; padding: 1.4rem 1.6rem;
+  margin: .6rem 0 1rem; font-family: 'Poppins', sans-serif;
+  background: linear-gradient(135deg, #4f46e5, #7c3aed 55%, #db2777);
+  box-shadow: 0 16px 36px rgba(79, 70, 229, .38); animation: nvFadeUp .6s ease both;
+}
+.nv-card.frozen { background: linear-gradient(135deg, #475569, #64748b); box-shadow: 0 16px 36px rgba(71,85,105,.35); }
+.nv-card::after {
+  content: ""; position: absolute; top: 0; left: -70%; width: 40%; height: 100%;
+  background: linear-gradient(120deg, transparent, rgba(255,255,255,.28), transparent);
+  transform: skewX(-20deg); animation: nvShine 4.5s ease-in-out infinite;
+}
+.nv-card .top { display: flex; justify-content: space-between; align-items: center; font-size: .85rem; opacity: .9; letter-spacing: 1px; }
+.nv-card .label { margin-top: 1rem; font-size: .8rem; opacity: .8; }
+.nv-card .balance { font-size: clamp(1.8rem, 6vw, 2.6rem); font-weight: 800; margin: .1rem 0 1rem; }
+.nv-card .bottom { display: flex; justify-content: space-between; gap: 1rem; flex-wrap: wrap; font-weight: 600; letter-spacing: 1px; }
+.nv-card .bottom small { font-weight: 400; opacity: .75; font-size: .68rem; }
+
+[data-testid="stMetric"] {
+  border: 1px solid rgba(128,128,128,.25); background: rgba(128,128,128,.07);
+  border-radius: 18px; padding: .9rem 1.1rem; transition: transform .2s, box-shadow .2s;
+  animation: nvFadeUp .6s ease both;
+}
+[data-testid="stMetric"]:hover { transform: translateY(-4px); box-shadow: 0 10px 24px rgba(99,102,241,.22); }
+
+[data-testid="stForm"] {
+  border-radius: 20px; border: 1px solid rgba(128,128,128,.25);
+  background: rgba(128,128,128,.05); padding: 1.2rem; animation: nvFadeUp .6s ease both;
+}
+
+.stTabs [data-baseweb="tab-list"] { gap: 6px; }
+.stTabs [data-baseweb="tab"] { border-radius: 12px 12px 0 0; padding: 8px 16px; }
+.stTabs [aria-selected="true"] { background: rgba(99,102,241,.16); }
+
+.stButton > button, [data-testid="stFormSubmitButton"] > button, [data-testid="stDownloadButton"] > button {
+  background: linear-gradient(90deg, #6366f1, #8b5cf6); border: none; border-radius: 12px;
+  padding: .55rem 1.3rem; font-weight: 600; transition: transform .15s, box-shadow .15s;
+}
+.stButton > button *, [data-testid="stFormSubmitButton"] > button *, [data-testid="stDownloadButton"] > button * { color: #fff !important; }
+.stButton > button:hover, [data-testid="stFormSubmitButton"] > button:hover, [data-testid="stDownloadButton"] > button:hover {
+  transform: translateY(-2px); box-shadow: 0 8px 20px rgba(99,102,241,.4);
+}
+
+.nv-footer { text-align: center; opacity: .6; font-size: .8rem; margin-top: 2.2rem; font-family: 'Poppins', sans-serif; }
+</style>"""
+
+SPLASH_HTML = (
+    '<div class="nv-splash">'
+    '<div class="nv-logo">💠</div>'
+    '<div class="nv-name">NOVAVAULT</div>'
+    '<div class="nv-sub">Opening your vault...</div>'
+    '</div>'
+)
+
+HERO_HTML = (
+    '<div class="nv-hero">'
+    '<span class="nv-float f1">🪙</span><span class="nv-float f2">💎</span>'
+    '<span class="nv-float f3">💰</span><span class="nv-float f4">🔐</span>'
+    '<div class="nv-badge">SECURE &bull; INSTANT &bull; SMART</div>'
+    '<div class="nv-title">Nova<span>Vault</span></div>'
+    '<div class="nv-tag">Your money. Your vault. Your rules.</div>'
+    '</div>'
+)
+
+
+def inject_css():
+    st.markdown(NV_CSS, unsafe_allow_html=True)
+
+
+def render_header(logged_in):
+    """Big animated hero on the login screen, slim bar after login."""
+    if logged_in:
+        st.markdown(
+            '<div class="nv-compact">💠 <b>NovaVault</b> <span>Bank</span></div>',
+            unsafe_allow_html=True,
+        )
+        return
+    if not st.session_state.get("splash_shown"):
+        st.session_state["splash_shown"] = True
+        st.markdown(SPLASH_HTML, unsafe_allow_html=True)
+    st.markdown(HERO_HTML, unsafe_allow_html=True)
+    st.markdown(
+        '<div class="nv-chips">'
+        '<div class="nv-chip2">🔒 Hashed PIN<br><small>Your PIN is never stored</small></div>'
+        '<div class="nv-chip2">⚡ Instant transfers<br><small>Send money by username</small></div>'
+        f'<div class="nv-chip2">📈 {INTEREST_RATE}% interest<br><small>On Savings accounts</small></div>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def balance_card(acc):
+    """Credit-card style balance box. Names are escaped because they come from users."""
+    number = f"{acc.acc_no[:4]} {acc.acc_no[4:]}"
+    frozen = " frozen" if acc.status != "active" else ""
+    state = "FROZEN" if frozen else "ACTIVE"
+    return (
+        f'<div class="nv-card{frozen}">'
+        f'<div class="top"><span>{html.escape(acc.acc_type.upper())} ACCOUNT</span><span>● {state}</span></div>'
+        '<div class="label">Available balance</div>'
+        f'<div class="balance">{money(acc.balance)}</div>'
+        '<div class="bottom">'
+        f'<div><small>ACCOUNT NO.</small><br>{number}</div>'
+        f'<div><small>HOLDER</small><br>{html.escape(acc.name.upper())}</div>'
+        '</div></div>'
+    )
+
+
+def render_footer():
+    st.markdown(
+        '<div class="nv-footer">NovaVault Bank &bull; Built with Python &amp; Streamlit</div>',
+        unsafe_allow_html=True,
+    )
+
+
 def flash(kind, message):
     """Show a message on the next screen (needed because we call rerun)."""
     st.session_state["flash"] = (kind, message)
@@ -618,17 +794,18 @@ def login_page(bank):
 
 def user_page(bank, acc):
     c1, c2 = st.columns([3, 1])
-    c1.subheader(f"Welcome, {acc.name}")
+    c1.subheader(f"Welcome back, {acc.name} 👋")
     if c2.button("Logout"):
         logout()
 
     if acc.status != "active":
         st.error("Your account is frozen. Please contact the admin.")
-    st.caption(f"Account number: {acc.acc_no}  |  Username: {acc.username or '-'}  |  {acc.acc_type}")
+    st.markdown(balance_card(acc), unsafe_allow_html=True)
+    st.caption(f"Username: {acc.username or '-'}")
 
     m1, m2 = st.columns(2)
-    m1.metric("Balance", money(acc.balance))
-    m2.metric("Daily limit left", money(max(DAILY_LIMIT - acc.today_out(), 0)))
+    m1.metric("Daily limit left", money(max(DAILY_LIMIT - acc.today_out(), 0)))
+    m2.metric("Spent today", money(acc.today_out()))
 
     tab_dep, tab_wd, tab_tr, tab_st, tab_pf = st.tabs(
         ["Deposit", "Withdraw", "Transfer", "Statement", "Profile"]
@@ -762,7 +939,7 @@ def user_page(bank, acc):
 
 def admin_page(bank):
     c1, c2 = st.columns([3, 1])
-    c1.subheader("Admin panel")
+    c1.subheader("🛡️ Admin Console")
     if c2.button("Logout"):
         logout()
 
@@ -891,13 +1068,14 @@ def admin_page(bank):
 #                                MAIN
 # =====================================================================
 def main():
-    st.set_page_config(page_title="Bank System", page_icon="🏦")
+    st.set_page_config(page_title="NovaVault Bank", page_icon="💠")
     if "user" not in st.session_state:
         st.session_state["user"] = None
         st.session_state["role"] = None
 
     bank = Bank()
-    st.title("🏦 Bank System")
+    inject_css()
+    render_header(st.session_state["user"] is not None)
     show_flash()
 
     if st.session_state["user"] is None:
@@ -913,6 +1091,8 @@ def main():
             st.rerun()
         else:
             user_page(bank, acc)
+
+    render_footer()
 
 
 if __name__ == "__main__":
