@@ -1,5 +1,5 @@
 """
-NovaVault Bank - Bank Account Management System 
+NovaVault Bank - Bank Account Management System
 
 Project scope used: functions, loops, if/else, file handling,
 classes and objects.
@@ -22,6 +22,7 @@ import time
 from datetime import date, datetime
 
 import streamlit as st
+from PIL import Image, ImageDraw, ImageFont, ImageOps   # comes with Streamlit
 
 # ---------------- Settings ----------------
 DATA_FILE = "accounts.json"
@@ -31,6 +32,8 @@ MAX_DEPOSIT = 1000000.0        # max single deposit
 MAX_ATTEMPTS = 3               # wrong PINs before lock
 LOCK_SECONDS = 300             # lock time (5 minutes)
 INTEREST_RATE = 4.0            # yearly % for Savings accounts
+AVATAR_DIR = "avatars"          # profile photos are saved here as <account number>.png
+MAX_AVATAR_BYTES = 2_000_000   # 2 MB upload limit
 SESSION_TIMEOUT = 600        # auto logout after 10 minutes without activity
 SECURITY_QUESTIONS = [
     "What is your pet's name?",
@@ -54,6 +57,61 @@ def valid_pin(pin):
 def new_ref():
     """Short unique reference number for every transaction."""
     return "TXN" + os.urandom(4).hex().upper()
+
+
+def avatar_path(acc_no):
+    return os.path.join(AVATAR_DIR, f"{acc_no}.png")
+
+
+def save_avatar(acc_no, data):
+    """Check the uploaded photo, crop it to a square and save a small copy."""
+    if not str(acc_no).isdigit():
+        return False, "Invalid account"
+    if len(data) > MAX_AVATAR_BYTES:
+        return False, "Photo is too large. Maximum size is 2 MB"
+    try:
+        Image.open(io.BytesIO(data)).verify()          # is it really an image?
+        img = Image.open(io.BytesIO(data))
+        if img.width * img.height > 25_000_000:
+            return False, "Photo resolution is too high"
+        img = ImageOps.exif_transpose(img).convert("RGB")
+    except Exception:
+        return False, "This file is not a valid image"
+    side = min(img.size)
+    left, top = (img.width - side) // 2, (img.height - side) // 2
+    img = img.crop((left, top, left + side, top + side)).resize((256, 256))
+    os.makedirs(AVATAR_DIR, exist_ok=True)
+    img.save(avatar_path(acc_no), "PNG")
+    return True, "Profile photo updated"
+
+
+def remove_avatar(acc_no):
+    try:
+        os.remove(avatar_path(acc_no))
+    except OSError:
+        pass
+
+
+def default_avatar(name):
+    """Purple circle photo with the first letter of the name, used until a photo is uploaded."""
+    img = Image.new("RGB", (256, 256), "#6d28d9")
+    draw = ImageDraw.Draw(img)
+    try:
+        font = ImageFont.load_default(size=130)
+    except TypeError:                                   # very old Pillow
+        font = ImageFont.load_default()
+    letter = (name.strip()[:1] or "?").upper()
+    box_ = draw.textbbox((0, 0), letter, font=font)
+    draw.text(((256 - (box_[2] - box_[0])) / 2 - box_[0], (256 - (box_[3] - box_[1])) / 2 - box_[1]),
+              letter, fill="white", font=font)
+    out = io.BytesIO()
+    img.save(out, "PNG")
+    return out.getvalue()
+
+
+def avatar_image(acc):
+    path = avatar_path(acc.acc_no)
+    return path if os.path.exists(path) else default_avatar(acc.name)
 
 
 def get_admin_password():
@@ -384,6 +442,7 @@ class Bank:
 
     def delete_account(self, acc_no, who):
         acc = self.accounts.pop(acc_no, None)
+        remove_avatar(acc_no)
         if acc:
             self.log(who, f"Account {acc_no} ({acc.name}) deleted, balance {money(acc.balance)}")
             self.save()
@@ -673,6 +732,10 @@ footer { visibility: hidden; }
   -webkit-background-clip: text; background-clip: text; color: transparent; opacity: .85;
   animation: nvText 6s linear infinite;
 }
+.st-key-nvavatar img {
+  border-radius: 50%; aspect-ratio: 1 / 1; object-fit: cover;
+  border: 2px solid rgba(139,92,246,.85); box-shadow: 0 0 16px rgba(139,92,246,.55);
+}
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
@@ -757,7 +820,7 @@ def balance_card(acc, hide=False):
 
 def render_footer():
     st.markdown(
-        '<div class="nv-footer">NovaVault Bank &bull; Since 2026</div>',
+        '<div class="nv-footer">NovaVault Bank &bull; Built with Python &amp; Streamlit</div>',
         unsafe_allow_html=True,
     )
 
@@ -991,9 +1054,12 @@ def month_totals(rows):
 
 
 def user_page(bank, acc):
-    c1, c2 = st.columns([3, 1])
-    c1.subheader(f"Welcome back, {acc.name} 👋")
-    if c2.button("Logout"):
+    ca, cb, cc = st.columns([1, 4, 2])
+    with ca:
+        with box("nvavatar"):
+            st.image(avatar_image(acc), width=64)
+    cb.subheader(f"Welcome back, {acc.name} 👋")
+    if cc.button("Logout"):
         logout()
 
     if acc.status != "active":
@@ -1137,6 +1203,24 @@ def user_page(bank, acc):
         st.write(f"**Account type:** {acc.acc_type}")
         st.write(f"**Opened on:** {acc.created or '-'}")
         st.write(f"**Status:** {acc.status.title()}")
+
+        st.markdown("##### Profile photo")
+        n = st.session_state.get("avatar_n", 0)
+        photo = st.file_uploader("Upload a photo (PNG or JPG, up to 2 MB)",
+                                 type=["png", "jpg", "jpeg"], key=f"avatar_up_{n}")
+        if photo is not None:
+            st.image(photo, width=120)
+            if st.button("Save photo"):
+                ok, message = save_avatar(acc.acc_no, photo.getvalue())
+                if ok:
+                    bank.log(acc.acc_no, "Profile photo updated")
+                    st.session_state["avatar_n"] = n + 1      # clears the uploader
+                finish(bank, (ok, message))
+        if os.path.exists(avatar_path(acc.acc_no)):
+            if st.button("Remove photo"):
+                remove_avatar(acc.acc_no)
+                bank.log(acc.acc_no, "Profile photo removed")
+                finish(bank, (True, "Profile photo removed"))
 
         saved = [no for no in acc.payees if no in bank.accounts]
         if saved:
