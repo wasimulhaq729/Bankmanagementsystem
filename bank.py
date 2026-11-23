@@ -1,39 +1,37 @@
 """
-NovaVault Bank - Bank Account Management System (plain Python, desktop window)
+NovaVault Bank - Bank Account Management System 
 
+Project scope used: functions, loops, if/else, file handling,
+classes and objects.
+
+Features: login with lockout, deposit / withdraw / transfer with PIN
+confirmation, transaction reference numbers, saved payees, statement with
+filters, charts and PDF / CSV download, savings interest, admin console,
+backup / restore, auto logout after 10 minutes.
 """
 import csv
 import hashlib
 import hmac
+import html
+import io
 import json
-import math
 import os
 import random
 import re
-import shutil
 import time
-import tkinter as tk
 from datetime import date, datetime
-from tkinter import filedialog, messagebox, simpledialog, ttk
-from tkinter import font as tkfont
 
-try:
-    from PIL import Image, ImageDraw, ImageOps, ImageTk
-    HAVE_PIL = True
-except Exception:
-    HAVE_PIL = False
+import streamlit as st
 
 # ---------------- Settings ----------------
 DATA_FILE = "accounts.json"
-AVATAR_DIR = "avatars"          # profile photos are saved here as <account number>.png
-MAX_AVATAR_BYTES = 2_000_000    # 2 MB photo limit
 MIN_BALANCE = {"Savings": 500.0, "Current": 0.0}  # also the minimum opening deposit
-DAILY_LIMIT = 50000.0           # max money going out per day (withdraw + transfer)
-MAX_DEPOSIT = 1000000.0         # max single deposit
-MAX_ATTEMPTS = 3                # wrong PINs before lock
-LOCK_SECONDS = 300              # lock time (5 minutes)
-INTEREST_RATE = 4.0             # yearly % for Savings accounts
-SESSION_TIMEOUT = 600           # auto logout after 10 minutes without activity
+DAILY_LIMIT = 50000.0          # max money going out per day (withdraw + transfer)
+MAX_DEPOSIT = 1000000.0        # max single deposit
+MAX_ATTEMPTS = 3               # wrong PINs before lock
+LOCK_SECONDS = 300             # lock time (5 minutes)
+INTEREST_RATE = 4.0            # yearly % for Savings accounts
+SESSION_TIMEOUT = 600        # auto logout after 10 minutes without activity
 SECURITY_QUESTIONS = [
     "What is your pet's name?",
     "What is your mother's maiden name?",
@@ -46,7 +44,7 @@ MONEY_OUT = ("Withdraw", "Transfer Out")
 
 
 def money(value):
-    return f"\u20b9 {value:,.2f}"
+    return f"₹ {value:,.2f}"
 
 
 def valid_pin(pin):
@@ -58,59 +56,12 @@ def new_ref():
     return "TXN" + os.urandom(4).hex().upper()
 
 
-def to_float(text):
-    """Turn typed text into a number. Returns None for anything that is not a normal number
-    (so 'nan' and 'inf' can never reach a balance)."""
-    try:
-        value = float(str(text).replace(",", "").strip())
-    except ValueError:
-        return None
-    return value if math.isfinite(value) else None
-
-
 def get_admin_password():
-    """Admin password: ADMIN_PASSWORD environment variable, or admin_password.txt."""
-    if os.environ.get("ADMIN_PASSWORD"):
-        return os.environ["ADMIN_PASSWORD"]
+    """Admin password comes from Streamlit secrets or an environment variable."""
     try:
-        with open("admin_password.txt", encoding="utf-8") as f:
-            return f.readline().strip() or None
-    except OSError:
-        return None
-
-
-# ---------------- profile photos ----------------
-def avatar_path(acc_no):
-    return os.path.join(AVATAR_DIR, f"{acc_no}.png")
-
-
-def save_avatar(acc_no, source):
-    """Check the chosen photo, crop it to a square and keep a small copy."""
-    if not str(acc_no).isdigit():
-        return False, "Invalid account"
-    if os.path.getsize(source) > MAX_AVATAR_BYTES:
-        return False, "Photo is too large. Maximum size is 2 MB"
-    os.makedirs(AVATAR_DIR, exist_ok=True)
-    if not HAVE_PIL:
-        if not source.lower().endswith(".png"):
-            return False, "Choose a PNG photo (or run: pip install pillow to use JPG)"
-        shutil.copyfile(source, avatar_path(acc_no))
-        return True, "Profile photo updated"
-    try:
-        img = ImageOps.exif_transpose(Image.open(source)).convert("RGB")
+        return st.secrets["ADMIN_PASSWORD"]
     except Exception:
-        return False, "This file is not a valid image"
-    side = min(img.size)
-    left, top = (img.width - side) // 2, (img.height - side) // 2
-    img.crop((left, top, left + side, top + side)).resize((256, 256)).save(avatar_path(acc_no), "PNG")
-    return True, "Profile photo updated"
-
-
-def remove_avatar(acc_no):
-    try:
-        os.remove(avatar_path(acc_no))
-    except OSError:
-        pass
+        return os.environ.get("ADMIN_PASSWORD")
 
 
 # =====================================================================
@@ -433,7 +384,6 @@ class Bank:
 
     def delete_account(self, acc_no, who):
         acc = self.accounts.pop(acc_no, None)
-        remove_avatar(acc_no)
         if acc:
             self.log(who, f"Account {acc_no} ({acc.name}) deleted, balance {money(acc.balance)}")
             self.save()
@@ -567,942 +517,862 @@ class Bank:
 
 
 # =====================================================================
-#                      LOOK: colours and drawing helpers
+#                           SCREEN HELPERS
 # =====================================================================
-LILAC, PURPLE, DEEP = "#c4a8ff", "#7c3aed", "#3b1d6e"
-PINK, CORAL, CREAM, SOFT = "#f472b6", "#ff6b81", "#fbf6ff", "#efe4ff"
-FONT = "Segoe UI"
-W, H = 1040, 700
+NV_CSS = """<style>
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;600;700;800&display=swap');
+@keyframes nvFadeUp { from {opacity:0; transform:translateY(18px);} to {opacity:1; transform:none;} }
+@keyframes nvGradient { 0%{background-position:0% 50%} 50%{background-position:100% 50%} 100%{background-position:0% 50%} }
+@keyframes nvFloat { 0%,100%{transform:translateY(0) rotate(0deg)} 50%{transform:translateY(-16px) rotate(8deg)} }
+@keyframes nvSplash { 0%,65%{opacity:1; visibility:visible} 100%{opacity:0; visibility:hidden} }
+@keyframes nvPop { 0%{transform:scale(.6); opacity:0} 60%{transform:scale(1.08); opacity:1} 100%{transform:scale(1)} }
+@keyframes nvShine { 0%{left:-70%} 100%{left:140%} }
+@keyframes nvGlow { 0%,100%{box-shadow:0 16px 36px rgba(79,70,229,.38), 0 0 0 rgba(168,85,247,0)} 50%{box-shadow:0 20px 48px rgba(124,58,237,.55), 0 0 38px rgba(219,39,119,.35)} }
+@keyframes nvHolo { 0%{filter:hue-rotate(0deg)} 100%{filter:hue-rotate(360deg)} }
+@keyframes nvOrb { 0%,100%{transform:translate(0,0) scale(1)} 50%{transform:translate(4%,6%) scale(1.15)} }
+@keyframes nvIce { 0%,100%{opacity:.55} 50%{opacity:.9} }
+@keyframes nvText { to{background-position:200% center} }
+
+.block-container { padding-top: 2rem; max-width: 900px; }
+footer { visibility: hidden; }
+
+.nv-splash {
+  position: fixed; inset: 0; z-index: 99999; pointer-events: none;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  background: linear-gradient(135deg, #1e1b4b, #4c1d95, #0e7490);
+  color: #fff; font-family: 'Poppins', sans-serif;
+  animation: nvSplash 2.6s ease forwards;
+}
+.nv-splash .nv-logo { font-size: 4.5rem; animation: nvPop .9s ease both; }
+.nv-splash .nv-name { font-size: 2.2rem; font-weight: 800; letter-spacing: 3px; animation: nvFadeUp 1s ease .3s both; }
+.nv-splash .nv-sub { opacity: .8; animation: nvFadeUp 1s ease .6s both; }
+
+.nv-hero {
+  position: relative; overflow: hidden; text-align: center; color: #fff;
+  padding: 2.4rem 1rem 2rem; border-radius: 26px; margin-bottom: 1.2rem;
+  background: linear-gradient(135deg, #312e81, #6d28d9, #0891b2, #312e81);
+  background-size: 300% 300%;
+  animation: nvGradient 12s ease infinite, nvFadeUp .8s ease both;
+  box-shadow: 0 18px 40px rgba(76, 29, 149, .35);
+  font-family: 'Poppins', sans-serif;
+}
+.nv-hero .nv-badge {
+  display: inline-block; padding: 4px 14px; border-radius: 999px; font-size: .78rem;
+  background: rgba(255,255,255,.18); border: 1px solid rgba(255,255,255,.35); letter-spacing: 1px;
+}
+.nv-hero .nv-title { font-size: clamp(2.2rem, 7vw, 3.6rem); font-weight: 800; letter-spacing: 2px; margin: .5rem 0 0; line-height: 1.1; }
+.nv-hero .nv-title span { background: linear-gradient(90deg, #fde68a, #fff, #a5f3fc); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.nv-hero .nv-tag { opacity: .9; margin: .4rem 0 0; font-size: 1rem; }
+.nv-hero .nv-float { position: absolute; font-size: 1.8rem; opacity: .55; animation: nvFloat 6s ease-in-out infinite; }
+.nv-hero .f1 { left: 8%; top: 18%; }
+.nv-hero .f2 { right: 10%; top: 12%; animation-delay: 1.2s; }
+.nv-hero .f3 { left: 18%; bottom: 10%; animation-delay: 2.4s; }
+.nv-hero .f4 { right: 16%; bottom: 14%; animation-delay: 3.4s; }
+
+.nv-chips { display: flex; flex-wrap: wrap; gap: 10px; margin: 0 0 1rem; }
+.nv-chip2 {
+  flex: 1 1 170px; text-align: center; padding: .8rem 1rem; border-radius: 16px; font-size: .9rem;
+  border: 1px solid rgba(128,128,128,.25); background: rgba(128,128,128,.07);
+  animation: nvFadeUp .8s ease both; transition: transform .2s, box-shadow .2s;
+}
+.nv-chip2:hover { transform: translateY(-5px); box-shadow: 0 10px 22px rgba(99,102,241,.25); }
+
+.nv-compact {
+  font-family: 'Poppins', sans-serif; font-size: 1.15rem; padding: .55rem 1rem; border-radius: 14px;
+  margin-bottom: .8rem; color: #fff; animation: nvFadeUp .5s ease both;
+  background: linear-gradient(90deg, #312e81, #6d28d9, #0891b2);
+}
+.nv-compact span { opacity: .8; }
 
 
-def mix(c1, c2, t):
-    t = max(0.0, min(1.0, t))
-    a = [int(c1[i:i + 2], 16) for i in (1, 3, 5)]
-    b = [int(c2[i:i + 2], 16) for i in (1, 3, 5)]
-    return "#%02x%02x%02x" % tuple(int(a[i] + (b[i] - a[i]) * t) for i in range(3))
+[data-testid="stMetric"] {
+  border: 1px solid rgba(128,128,128,.25); background: rgba(128,128,128,.07);
+  border-radius: 18px; padding: .9rem 1.1rem; transition: transform .2s, box-shadow .2s;
+  animation: nvFadeUp .6s ease both;
+}
+[data-testid="stMetric"]:hover { transform: translateY(-4px); box-shadow: 0 10px 24px rgba(99,102,241,.22); }
+
+[data-testid="stForm"] {
+  border-radius: 20px; border: 1px solid rgba(128,128,128,.25);
+  background: rgba(128,128,128,.05); padding: 1.2rem; animation: nvFadeUp .6s ease both;
+}
+
+.stTabs [data-baseweb="tab-list"] { gap: 8px; }
+.stTabs button[role="tab"] { border-radius: 999px !important; padding: 8px 18px; transition: background .2s; }
+.stTabs button[role="tab"]:hover { background: rgba(99,102,241,.10); }
+.stTabs button[aria-selected="true"] { background: rgba(99,102,241,.22); border-radius: 999px !important; }
+
+.stButton > button, [data-testid="stFormSubmitButton"] > button, [data-testid="stDownloadButton"] > button {
+  background: linear-gradient(90deg, #6366f1, #8b5cf6); border: none; border-radius: 12px;
+  padding: .55rem 1.3rem; font-weight: 600; transition: transform .15s, box-shadow .15s;
+}
+.stButton > button *, [data-testid="stFormSubmitButton"] > button *, [data-testid="stDownloadButton"] > button * { color: #fff !important; }
+.stButton > button:hover, [data-testid="stFormSubmitButton"] > button:hover, [data-testid="stDownloadButton"] > button:hover {
+  transform: translateY(-2px); box-shadow: 0 8px 20px rgba(99,102,241,.4);
+}
+
+.nv-footer { text-align: center; opacity: .6; font-size: .8rem; margin-top: 2.2rem; font-family: 'Poppins', sans-serif; }
+/* ---- balance card: native Streamlit containers styled with CSS only ---- */
+.st-key-nvstack { position: relative; perspective: 1100px; margin: .8rem 0 2.4rem; }
+.st-key-nvstack::before, .st-key-nvstack::after {
+  content: ""; position: absolute; left: 5%; right: 5%; top: 0; bottom: 0; border-radius: 24px;
+  transition: transform .45s cubic-bezier(.2,.8,.2,1);
+}
+.st-key-nvstack::before { background: linear-gradient(135deg, #0891b2, #6366f1); opacity: .45; transform: translateY(14px) scale(.94); }
+.st-key-nvstack::after  { background: linear-gradient(135deg, #db2777, #7c3aed); opacity: .28; transform: translateY(26px) scale(.88); z-index: -1; }
+.st-key-nvstack:hover::before { transform: translateY(20px) scale(.95); }
+.st-key-nvstack:hover::after  { transform: translateY(38px) scale(.9); }
+
+[class*="st-key-nvcard_"] {
+  position: relative; z-index: 1; overflow: hidden; border-radius: 24px; padding: 1.4rem 1.6rem; gap: .2rem;
+  background:
+    url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' width='44' height='32' viewBox='0 0 44 32'><defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'><stop offset='0' stop-color='%23fde68a'/><stop offset='.55' stop-color='%23f59e0b'/><stop offset='1' stop-color='%23fde68a'/></linearGradient></defs><rect width='44' height='32' rx='7' fill='url(%23g)'/><path d='M0 11h14M0 21h14M30 11h14M30 21h14M14 0v32M30 0v32' stroke='%23b45309' stroke-opacity='.4' fill='none'/><rect x='14' y='9' width='16' height='14' rx='3' fill='none' stroke='%23b45309' stroke-opacity='.4'/></svg>") right 1.6rem top 1.4rem / 44px 32px no-repeat,
+    linear-gradient(135deg, #4f46e5, #7c3aed 55%, #db2777);
+  transform-style: preserve-3d; transition: transform .45s cubic-bezier(.2,.8,.2,1);
+  animation: nvFadeUp .6s ease both, nvGlow 4s ease-in-out infinite;
+}
+.st-key-nvstack:hover [class*="st-key-nvcard_"] { transform: rotateX(5deg) rotateY(-7deg) translateY(-4px); }
+[class*="st-key-nvcard_"] * { color: #fff !important; font-family: 'Poppins', sans-serif; }
+[class*="st-key-nvcard_"] > * { position: relative; z-index: 2; }
+[class*="st-key-nvcard_"] h2 { font-size: clamp(1.8rem, 6vw, 2.6rem); font-weight: 800; padding: 0; margin: 0 0 .6rem; transition: filter .35s ease; }
+[class*="st-key-nvcard_"] [data-testid="stCaptionContainer"] { opacity: .8; }
+[class*="st-key-nvcard_"] a { display: none; }
+[class*="st-key-nvcard_"]::before {          /* holographic sheen */
+  content: ""; position: absolute; inset: 0; pointer-events: none; mix-blend-mode: overlay; opacity: .35;
+  background: conic-gradient(from 210deg at 80% 20%, #fde68a, #a5f3fc, #f0abfc, #fde68a);
+  animation: nvHolo 9s linear infinite;
+}
+[class*="st-key-nvcard_"]::after {           /* moving shine */
+  content: ""; position: absolute; top: 0; left: -70%; width: 40%; height: 100%; pointer-events: none;
+  background: linear-gradient(120deg, transparent, rgba(255,255,255,.28), transparent);
+  transform: skewX(-20deg); animation: nvShine 4.5s ease-in-out infinite;
+}
+[class*="st-key-nvcard_"][class*="_hide"] h2 { filter: blur(11px); user-select: none; }
+[class*="st-key-nvcard_frozen_"] {
+  background: linear-gradient(135deg, #475569, #64748b); animation: nvFadeUp .6s ease both;
+}
+[class*="st-key-nvcard_frozen_"]::before {
+  mix-blend-mode: normal; opacity: .55; animation: nvIce 3s ease-in-out infinite;
+  background: linear-gradient(160deg, rgba(255,255,255,.35), rgba(186,230,253,.12) 45%, rgba(255,255,255,.3));
+}
+[class*="st-key-nvcard_frozen_"]::after { animation-duration: 9s; }
+
+/* ---- ambient glow, tabs, footer ---- */
+.stApp::before {
+  content: ""; position: fixed; inset: -10%; z-index: 0; pointer-events: none; opacity: .16;
+  background:
+    radial-gradient(circle at 15% 20%, #6d28d9 0, transparent 38%),
+    radial-gradient(circle at 85% 75%, #0891b2 0, transparent 40%),
+    radial-gradient(circle at 70% 10%, #db2777 0, transparent 30%);
+  animation: nvOrb 16s ease-in-out infinite;
+}
+.stTabs [data-baseweb="tab-highlight"] { display: none; }
+[data-testid="stColumn"]:nth-child(2) [data-testid="stMetric"] { animation-delay: .12s; }
+.nv-footer {
+  background: linear-gradient(90deg, #888, #8b5cf6, #0891b2, #888); background-size: 200% auto;
+  -webkit-background-clip: text; background-clip: text; color: transparent; opacity: .85;
+  animation: nvText 6s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}
+</style>"""
+
+SPLASH_HTML = (
+    '<div class="nv-splash">'
+    '<div class="nv-logo">💠</div>'
+    '<div class="nv-name">NOVAVAULT</div>'
+    '<div class="nv-sub">Opening your vault...</div>'
+    '</div>'
+)
+
+HERO_HTML = (
+    '<div class="nv-hero">'
+    '<span class="nv-float f1">🪙</span><span class="nv-float f2">💎</span>'
+    '<span class="nv-float f3">💰</span><span class="nv-float f4">🔐</span>'
+    '<div class="nv-badge">SECURE &bull; INSTANT &bull; SMART</div>'
+    '<div class="nv-title">Nova<span>Vault</span></div>'
+    '<div class="nv-tag">Your money. Your vault. Your rules.</div>'
+    '</div>'
+)
 
 
-def rrect(cv, x1, y1, x2, y2, r, **kw):
-    """Rounded rectangle."""
-    pts = [x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r, x2, y2 - r, x2, y2,
-           x2 - r, y2, x1 + r, y2, x1, y2, x1, y2 - r, x1, y1 + r, x1, y1]
-    return cv.create_polygon(pts, smooth=True, **kw)
+def inject_css():
+    st.markdown(NV_CSS, unsafe_allow_html=True)
 
 
-def bubble_image(size, tint):
-    """Glass bubble with a real see-through body (needs Pillow): clear middle, soft coloured
-    edge, bright rim and two shiny highlights."""
-    big = size * 4
-    img = Image.new("RGBA", (big, big), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    r, g, b = tint
-    half = big // 2
-    for i in range(0, half, 2):                      # body: clearer in the middle, denser at the edge
-        k = i / half
-        alpha = int(6 + 70 * (1 - k) ** 3)
-        d.ellipse((i, i, big - 1 - i, big - 1 - i), outline=(r, g, b, alpha), width=2)
-    d.ellipse((0, 0, big - 1, big - 1), outline=(255, 255, 255, 185), width=max(3, big // 36))
-    d.arc((big * .12, big * .12, big * .88, big * .88), 200, 285, fill=(255, 255, 255, 215), width=max(3, big // 24))
-    d.arc((big * .12, big * .12, big * .88, big * .88), 20, 60, fill=(255, 255, 255, 120), width=max(2, big // 40))
-    d.ellipse((big * .64, big * .20, big * .74, big * .28), fill=(255, 255, 255, 190))
-    return img.resize((size, size), getattr(Image, "Resampling", Image).LANCZOS)
+def render_header(logged_in):
+    """Big animated hero on the login screen, slim bar after login."""
+    if logged_in:
+        st.markdown(
+            '<div class="nv-compact">💠 <b>NovaVault</b> <span>Bank</span></div>',
+            unsafe_allow_html=True,
+        )
+        return
+    if not st.session_state.get("splash_shown"):
+        st.session_state["splash_shown"] = True
+        st.markdown(SPLASH_HTML, unsafe_allow_html=True)
+    st.markdown(HERO_HTML, unsafe_allow_html=True)
+    st.markdown(
+        '<div class="nv-chips">'
+        '<div class="nv-chip2">🔒 Hashed PIN<br><small>Your PIN is never stored</small></div>'
+        '<div class="nv-chip2">⚡ Instant transfers<br><small>Send money by username</small></div>'
+        f'<div class="nv-chip2">📈 {INTEREST_RATE}% interest<br><small>On Savings accounts</small></div>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
 
 
-class Pill(tk.Canvas):
-    """Glossy 3D-style pill button."""
-
-    def __init__(self, parent, text, command, w=170, h=44, color=PURPLE, fg="white", bg=CREAM, size=11):
-        super().__init__(parent, width=w, height=h, bg=bg, highlightthickness=0, cursor="hand2")
-        self.cmd, self.color, self.w, self.h, self.text, self.fg, self.size = command, color, w, h, text, fg, size
-        self.draw(color)
-        self.bind("<Enter>", lambda e: self.draw(mix(self.color, "#ffffff", .18)))
-        self.bind("<Leave>", lambda e: self.draw(self.color))
-        self.bind("<ButtonPress-1>", lambda e: self.draw(mix(self.color, "#000000", .15)))
-        self.bind("<ButtonRelease-1>", self.release)
-
-    def draw(self, col):
-        self.delete("all")
-        rrect(self, 2, 6, self.w - 2, self.h - 1, self.h // 2, fill=mix(col, "#000000", .22), outline="")
-        rrect(self, 2, 2, self.w - 2, self.h - 5, self.h // 2, fill=col, outline="")
-        rrect(self, 12, 5, self.w - 12, self.h // 2, self.h // 4, fill=mix(col, "#ffffff", .30), outline="")
-        self.create_text(self.w // 2, self.h // 2 - 2, text=self.text, fill=self.fg, font=(FONT, self.size, "bold"))
-
-    def release(self, e):
-        self.draw(mix(self.color, "#ffffff", .18))
-        if 0 <= e.x <= self.w and 0 <= e.y <= self.h:
-            self.cmd()
+def md_safe(text):
+    """Escape markdown characters, because names come from users."""
+    return re.sub(r"([\\`*_{}\[\]()#+\-.!|<>~$])", r"\\\1", str(text))
 
 
-def label(parent, text, size=10, bold=True, fg=DEEP, **kw):
-    return tk.Label(parent, text=text, bg=parent["bg"], fg=fg, anchor="w",
-                    font=(FONT, size, "bold" if bold else "normal"), **kw)
+def box(key):
+    """A container with a CSS class (st-key-<key>); older Streamlit has no key."""
+    try:
+        return st.container(key=key)
+    except TypeError:
+        return st.container()
 
 
-def entry(parent, show="", width=26):
-    return tk.Entry(parent, show=show, width=width, font=(FONT, 11), relief="flat", bg="white", fg=DEEP,
-                    insertbackground=DEEP, highlightthickness=2, highlightbackground="#dccbff", highlightcolor=PURPLE)
+def balance_card(acc, hide=False):
+    """Credit-card style balance box built from Streamlit containers, styled only by CSS."""
+    number = f"{acc.acc_no[:4]} {acc.acc_no[4:]}"
+    frozen = acc.status != "active"
+    state = "FROZEN" if frozen else "ACTIVE"
+    key = f"nvcard_{'frozen' if frozen else 'active'}_{'hide' if hide else 'show'}"
+    with box("nvstack"):
+        with box(key):
+            st.markdown(f"**{md_safe(acc.acc_type.upper())} ACCOUNT** · ● {state}")
+            st.caption("")
+            st.caption("Available balance")
+            st.markdown(f"## {money(acc.balance)}")
+            c1, c2 = st.columns(2)
+            c1.caption("ACCOUNT NO.")
+            c1.markdown(f"**{number}**")
+            c2.caption("HOLDER")
+            c2.markdown(f"**{md_safe(acc.name.upper())}**")
 
 
-class Stage(tk.Canvas):
-    """The animated pastel world behind everything."""
-
-    def __init__(self, root):
-        super().__init__(root, width=W, height=H, highlightthickness=0, bd=0)
-        self.pack()
-        self.t = 0.0
-        self.planes, self.clouds, self.pills = [], [], []
-        self.bubbles, self.bubble_cache = [], {}
-        self.ribbon = None
-        self._tok = None
-        self.build()
-        self.animate()
-
-    # ----- scenery -----
-    def build(self):
-        for y in range(0, H, 4):
-            t = y / H
-            col = mix("#bda0ff", "#e9d9ff", t / .55) if t < .55 else mix("#e9d9ff", "#fff4fb", (t - .55) / .45)
-            self.create_rectangle(0, y, W, y + 4, fill=col, outline=col)
-        for k in range(16, 0, -1):                                   # sun glow, top right
-            r = 26 * k
-            c = mix("#ffffff", "#d9c4ff", (k - 1) / 15)
-            self.create_oval(W - 90 - r, 30 - r, W - 90 + r, 30 + r, fill=c, outline="")
-        for i in range(26):                                          # halftone dots, bottom left
-            for j in range(17):
-                r = 3.6 - (i * .11 + j * .17)
-                if r > .4:
-                    x, y = i * 14 + 8, H - j * 14 - 8
-                    self.create_oval(x - r, y - r, x + r, y + r, fill="#a083ee", outline="")
-        self.create_arc(-170, -170, 210, 210, start=270, extent=90, style="arc", outline="#ff6fae", width=24)
-        self.create_arc(W - 210, H - 210, W + 170, H + 170, start=90, extent=90, style="arc", outline="#ff6fae", width=24)
-        for x, y, s in ((120, 90, 1.0), (520, 40, .7), (880, 560, .9), (300, 600, .6)):
-            ids = [self.create_oval(x + dx * s, y + dy * s, x + (dx + w) * s, y + (dy + h) * s, fill="white", outline="")
-                   for dx, dy, w, h in ((0, 20, 90, 40), (25, 0, 60, 50), (60, 12, 70, 44), (-10, 28, 50, 28))]
-            self.clouds.append([ids, .25 + s * .2])
-        for x, y, s, c in ((470, 120, 1.0, PURPLE), (880, 230, .8, PINK), (60, 380, .7, "#9d7bff")):
-            a = self.create_polygon([x, y + 10 * s, x + 70 * s, y, x + 28 * s, y + 26 * s], fill=mix(c, "#ffffff", .35), outline="")
-            b = self.create_polygon([x + 28 * s, y + 26 * s, x + 70 * s, y, x + 36 * s, y + 48 * s], fill=c, outline="")
-            self.planes.append([[a, b], 0.0, 0.0, random.random() * 6, .7 + random.random() * .6])
-        for x, y, w, c in ((420, 640, 70, CORAL), (200, 60, 46, PINK), (960, 120, 54, "#a68bff")):
-            self.pills.append([rrect(self, x, y, x + w, y + w // 2, w // 4, fill=c, outline="white", width=2), 0.0, random.random() * 6])
-        for size in (96, 76, 62, 52, 44, 38, 32, 28, 24, 70, 46, 34, 58, 30):   # floating glass bubbles
-            self.spawn_bubble(size, random.randint(20, W - 20), random.randint(0, H))
-        self.tag_bind("bubble", "<Button-1>", self.pop_bubble)
-        self.ribbon = self.create_line(0, 0, 1, 1, width=7, fill="#ff5d73", smooth=True, capstyle="round")
-
-    def animate(self):
-        self.t += .035
-        for ids, sp in self.clouds:
-            for i in ids:
-                self.move(i, sp, 0)
-            if self.coords(ids[0])[0] > W + 20:
-                for i in ids:
-                    self.move(i, -(W + 260), 0)
-        for p in self.planes:
-            ox, oy = 14 * math.sin(self.t * p[4] + p[3]), 10 * math.cos(self.t * p[4] * 1.3 + p[3])
-            for i in p[0]:
-                self.move(i, ox - p[1], oy - p[2])
-            p[1], p[2] = ox, oy
-        for p in self.pills:
-            oy = 8 * math.sin(self.t * 1.2 + p[2])
-            self.move(p[0], 0, oy - p[1])
-            p[1] = oy
-        for b in self.bubbles:                      # glass bubbles drift up and sway
-            item, size, phase, speed = b
-            self.move(item, .7 * math.sin(self.t * .8 + phase), -speed)
-            x1, y1, x2, y2 = self.bbox(item)
-            if y2 < 0:
-                self.respawn(item, size)
-        pts = []
-        for x in range(-20, W + 60, 40):
-            pts += [x, H - 60 + 26 * math.sin(x / 95 + self.t) + 10 * math.sin(x / 40 - self.t * 1.7)]
-        self.coords(self.ribbon, *pts)
-        self.after(40, self.animate)
-
-    # ----- glass bubbles -----
-    def spawn_bubble(self, size, x, y):
-        tint = random.choice(((196, 168, 255), (244, 114, 182), (255, 255, 255), (150, 190, 255)))
-        if HAVE_PIL:                                       # real transparency
-            key = (size, tint)
-            if key not in self.bubble_cache:
-                self.bubble_cache[key] = ImageTk.PhotoImage(bubble_image(size, tint))
-            item = self.create_image(x, y, image=self.bubble_cache[key], tags="bubble")
-        else:                                              # no Pillow: stippled "see-through" look
-            r = size // 2
-            item = self.create_oval(x - r, y - r, x + r, y + r, fill=mix("#ffffff", "#c4a8ff", random.random()),
-                                    stipple="gray25", outline="white", width=2, tags="bubble")
-        self.bubbles.append([item, size, random.random() * 6, .25 + random.random() * .55])
-
-    def respawn(self, item, size):
-        x1, y1, x2, y2 = self.bbox(item)
-        self.move(item, random.randint(20, W - 20) - (x1 + x2) / 2, H + size - y1)
-
-    def pop_bubble(self, _e):
-        found = self.find_withtag("current")
-        for b in self.bubbles:
-            if found and b[0] == found[0]:
-                x1, y1, x2, y2 = self.bbox(b[0])
-                self.respawn(b[0], b[1])
-                self.burst((x1 + x2) / 2, (y1 + y2) / 2, (x2 - x1) / 2, 0)
-                return
-
-    def burst(self, cx, cy, r, n, ring=None):
-        if ring is None:
-            ring = self.create_oval(cx - r, cy - r, cx + r, cy + r, outline="white", width=3)
-        if n > 7:
-            self.delete(ring)
-            return
-        r2 = r + n * 4
-        self.coords(ring, cx - r2, cy - r2, cx + r2, cy + r2)
-        self.itemconfig(ring, width=max(1, 3 - n // 3))
-        self.after(24, lambda: self.burst(cx, cy, r, n + 1, ring))
-
-    # ----- motion helpers -----
-    def kinetic(self, text, x, y, size, tag, delay=0):
-        """Big title whose letters rise up and fade in, one after another."""
-        f = tkfont.Font(family=FONT, size=size, weight="bold")
-        cx = x
-        for i, ch in enumerate(text):
-            sh = self.create_text(cx + 4, y + 75, text=ch, anchor="w", font=f, fill="#a98af0", tags=tag)
-            tx = self.create_text(cx, y + 70, text=ch, anchor="w", font=f, fill="#d9c8ff", tags=tag)
-            self.after(delay + i * 70, lambda s=sh, t=tx: self.rise(s, t, 0))
-            cx += f.measure(ch)
-
-    def rise(self, sh, tx, n):
-        if n > 12:
-            return
-        e = lambda k: 70 * (1 - (1 - k / 12) ** 3)
-        d = e(n) - e(n - 1) if n else 0
-        self.move(sh, 0, -d)
-        self.move(tx, 0, -d)
-        self.itemconfig(tx, fill=mix("#d9c8ff", "#ffffff", n / 12))
-        self.after(28, lambda: self.rise(sh, tx, n + 1))
-
-    def reveal(self):
-        """Slide the cards up into place."""
-        self.move("card", 0, 40)
-        self.move("ui", 0, 40)
-        self.slide(0)
-
-    def slide(self, n):
-        if n < 10:
-            self.move("card", 0, -4)
-            self.move("ui", 0, -4)
-            self.after(18, lambda: self.slide(n + 1))
-
-    def toast(self, msg, ok=True):
-        self.delete("toast")
-        col = PURPLE if ok else "#e11d48"
-        w = max(280, len(msg) * 8 + 60)
-        x = W // 2
-        rrect(self, x - w // 2, -60, x + w // 2, -14, 23, fill=col, outline="white", width=2, tags="toast")
-        self.create_text(x, -37, text=msg, fill="white", font=(FONT, 11, "bold"), tags="toast")
-        tok = object()
-        self._tok = tok
-        self.drop(0)
-        self.after(3400, lambda: self.delete("toast") if self._tok is tok else None)
-
-    def drop(self, n):
-        if n < 8:
-            self.move("toast", 0, 10)
-            self.tag_raise("toast")
-            self.after(16, lambda: self.drop(n + 1))
+def render_footer():
+    st.markdown(
+        '<div class="nv-footer">NovaVault Bank &bull; Since 2026</div>',
+        unsafe_allow_html=True,
+    )
 
 
-class BubbleCursor:
-    """A glass bubble that follows the mouse pointer (Windows).
-    The window is see-through (colour key) and the middle of the bubble is empty, so every click
-    goes straight to the button underneath. On Mac / Linux, where see-through windows are not
-    available, it quietly switches itself off and the normal cursor is used."""
-    S, R, KEY = 88, 20, "#010203"
-    OFFSET = (5, 8)           # the bubble sits a little down-right, so the arrow is inside it
+def flash(kind, message):
+    """Show a message on the next screen (needed because we call rerun)."""
+    st.session_state["flash"] = (kind, message)
 
-    def __init__(self, root):
-        self.root, self.win, self.shown = root, None, False
-        self.t, self.n, self.pop, self.down, self.last = 0.0, 0, 0, False, None
-        win = None
-        try:
-            win = tk.Toplevel(root)
-            win.withdraw()
-            win.overrideredirect(True)
-            win.config(bg=self.KEY)
-            win.attributes("-topmost", True)
-            win.attributes("-transparentcolor", self.KEY)
-            win.attributes("-alpha", 0.9)
-        except tk.TclError:
-            if win is not None:
-                win.destroy()
-            return
-        self.win = win
-        self.cv = tk.Canvas(win, width=self.S, height=self.S, bg=self.KEY, highlightthickness=0, bd=0)
-        self.cv.pack()
-        root.bind_all("<ButtonPress-1>", self.press, add="+")
-        root.bind_all("<ButtonRelease-1>", self.release, add="+")
-        self.tick()
 
-    def press(self, _e):
-        self.down, self.pop = True, 8
+def show_flash():
+    item = st.session_state.pop("flash", None)
+    if item:
+        if item[0] == "success" and hasattr(st, "toast"):
+            st.toast(item[1], icon="✅")
+        else:
+            getattr(st, item[0])(item[1])
 
-    def release(self, _e):
-        self.down = False
 
-    def tick(self):
-        r = self.root
-        try:
-            px, py = r.winfo_pointerxy()
-            rx, ry = r.winfo_rootx(), r.winfo_rooty()
-            inside = rx <= px < rx + r.winfo_width() and ry <= py < ry + r.winfo_height()
-            focused = bool(str(r.tk.call("focus", "-displayof", ".")))
-            want = inside and focused and r.state() == "normal"
-            if want != self.shown:
-                self.win.deiconify() if want else self.win.withdraw()
-                self.shown, self.last = want, None
-            if want:
-                if (px, py) != self.last:
-                    x = px + self.OFFSET[0] - self.S // 2
-                    y = py + self.OFFSET[1] - self.S // 2
-                    self.win.geometry(f"{self.S}x{self.S}{x:+d}{y:+d}")
-                    self.last = (px, py)
-                self.t += .1
-                self.n += 1
-                if self.n % 3 == 0 or self.pop:
-                    self.draw()
-        except tk.TclError:
-            return                                   # the window was closed
-        r.after(16, self.tick)
+def logout():
+    st.session_state["user"] = None
+    st.session_state["role"] = None
+    st.rerun()
 
-    def draw(self):
-        c, mid = self.cv, self.S // 2
-        c.delete("all")
-        r = self.R + 1.2 * math.sin(self.t) - (3 if self.down else 0)
-        rim = PINK if self.down else "#b79bff"
-        box = lambda rad: (mid - rad, mid - rad, mid + rad, mid + rad)
-        c.create_oval(*box(r + 2), outline=rim, width=2)                        # coloured outer edge
-        c.create_oval(*box(r), outline="white", width=2)                        # bright rim
-        c.create_arc(*box(r - 4), start=105, extent=60, style="arc", outline="white", width=3)   # shine
-        c.create_oval(mid + r * .55 - 2, mid - r * .62 - 2, mid + r * .55 + 2, mid - r * .62 + 2,
-                      fill="white", outline="white")                            # sparkle
-        if self.pop:                                                            # ring that grows on click
-            k = 8 - self.pop
-            c.create_oval(*box(r + 4 + k * 2.4), outline=PINK if self.down else LILAC, width=max(1, 3 - k // 3))
-            self.pop -= 1
+
+def finish(bank, result):
+    """Save and refresh when an action worked, otherwise show the error."""
+    ok, message = result
+    if ok:
+        bank.save()
+        flash("success", message)
+        st.rerun()
+    else:
+        st.error(message)
+
+
+def history_rows(history):
+    rows = []
+    for h in reversed(history):
+        rows.append({
+            "Date": h.get("date", "-"),
+            "Time": h.get("time", "-"),
+            "Type": h.get("type", ""),
+            "Amount": h.get("amount", 0),
+            "Balance": h.get("balance", 0),
+            "Note": h.get("note", ""),
+            "Ref": h.get("ref", "-"),
+        })
+    return rows
+
+
+def rows_to_csv(rows):
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(["Date", "Time", "Type", "Amount", "Balance", "Note", "Ref"])
+    for r in rows:
+        writer.writerow([r["Date"], r["Time"], r["Type"], r["Amount"], r["Balance"], r["Note"], r["Ref"]])
+    return buffer.getvalue()
+
+
+def statement_pdf(acc, rows, start, end):
+    """Build a simple statement PDF by hand (no extra library needed)."""
+    def clean(text, width=None):
+        text = str(text).replace("₹", "Rs.").encode("latin-1", "replace").decode("latin-1")
+        text = text.replace("\\", "/").replace("(", "[").replace(")", "]")
+        return text[:width] if width else text
+
+    def num(v):
+        return f"{v:,.2f}"
+
+    head = [
+        ("B", 16, "NovaVault Bank"),
+        ("N", 10, "Account statement"),
+        ("N", 10, ""),
+        ("N", 10, f"Holder   : {clean(acc.name)}"),
+        ("N", 10, f"Account  : {acc.acc_no}  ({clean(acc.acc_type)})"),
+        ("N", 10, f"Period   : {start}  to  {end}"),
+        ("N", 10, f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}"),
+        ("N", 10, ""),
+        ("B", 9, f"{'Date':<10} {'Time':<8} {'Type':<13} {'Amount':>12} {'Balance':>12} {'Ref':<11} Note"),
+        ("N", 9, "-" * 94),
+    ]
+    body = []
+    for r in reversed(rows):                       # oldest first on paper
+        body.append(("N", 9, (
+            f"{clean(r['Date'], 10):<10} {clean(r['Time'], 8):<8} {clean(r['Type'], 13):<13} "
+            f"{num(r['Amount']):>12} {num(r['Balance']):>12} {clean(r['Ref'], 11):<11} {clean(r['Note'], 24)}"
+        )))
+    if not body:
+        body.append(("N", 9, "No transactions in this period."))
+    body.append(("N", 9, "-" * 94))
+    body.append(("N", 8, "This statement was generated by NovaVault Bank (demo project)."))
+
+    lines = head + body
+    per_page = 58
+    pages = [lines[i:i + per_page] for i in range(0, len(lines), per_page)]
+
+    objects = []                                    # index 0 -> object 1
+    objects.append("<< /Type /Catalog /Pages 2 0 R >>")
+    kids = " ".join(f"{5 + 2 * i} 0 R" for i in range(len(pages)))
+    objects.append(f"<< /Type /Pages /Kids [{kids}] /Count {len(pages)} >>")
+    objects.append("<< /Type /Font /Subtype /Type1 /BaseFont /Courier /Encoding /WinAnsiEncoding >>")
+    objects.append("<< /Type /Font /Subtype /Type1 /BaseFont /Courier-Bold /Encoding /WinAnsiEncoding >>")
+    for i, page in enumerate(pages):
+        y = 800
+        parts = []
+        for style, size, text in page:
+            font = "F2" if style == "B" else "F1"
+            parts.append(f"BT /{font} {size} Tf 40 {y} Td ({text}) Tj ET")
+            y -= size + 3.5 if size > 9 else 12
+        stream = "\n".join(parts)
+        objects.append(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] "
+            "/Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> "
+            f"/Contents {6 + 2 * i} 0 R >>"
+        )
+        objects.append(f"<< /Length {len(stream.encode('latin-1', 'replace'))} >>\nstream\n{stream}\nendstream")
+
+    out = bytearray(b"%PDF-1.4\n")
+    offsets = []
+    for n, body_text in enumerate(objects, start=1):
+        offsets.append(len(out))
+        out += f"{n} 0 obj\n".encode() + body_text.encode("latin-1", "replace") + b"\nendobj\n"
+    xref = len(out)
+    out += f"xref\n0 {len(objects) + 1}\n0000000000 65535 f \n".encode()
+    for off in offsets:
+        out += f"{off:010d} 00000 n \n".encode()
+    out += f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF".encode()
+    return bytes(out)
 
 
 # =====================================================================
-#                              THE APP
+#                               PAGES
 # =====================================================================
-NAV = [("overview", "Overview"), ("deposit", "Deposit"), ("withdraw", "Withdraw"),
-       ("transfer", "Transfer"), ("statement", "Statement"), ("profile", "Profile & settings")]
+def login_page(bank):
+    tab_login, tab_create, tab_forgot = st.tabs(["Login", "Create account", "Forgot PIN"])
+
+    with tab_login:
+        with st.form("login_form"):
+            identifier = st.text_input("Username or account number")
+            pin = st.text_input("PIN / Password", type="password")
+            go = st.form_submit_button("Login")
+        if go:
+            identifier = identifier.strip()
+            if identifier.lower() == "admin":
+                ok, message = bank.admin_login(pin, get_admin_password())
+                if ok:
+                    st.session_state["user"] = "admin"
+                    st.session_state["role"] = "admin"
+                    st.rerun()
+                st.error(message)
+            else:
+                acc, message = bank.authenticate(identifier, pin)
+                if acc:
+                    st.session_state["user"] = acc.acc_no
+                    st.session_state["role"] = "user"
+                    st.rerun()
+                st.error(message)
+        if not get_admin_password():
+            st.caption("Admin login is off (ADMIN_PASSWORD secret is not set).")
+
+    with tab_create:
+        with st.form("create_form"):
+            name = st.text_input("Full name*")
+            username = st.text_input("Username* (3-20 letters, digits or _)")
+            acc_type = st.selectbox("Account type", ["Savings", "Current"])
+            new_pin = st.text_input("PIN (4-8 digits)*", type="password")
+            confirm_pin = st.text_input("Confirm PIN*", type="password")
+            question = st.selectbox("Security question (for forgot PIN)", SECURITY_QUESTIONS)
+            answer = st.text_input("Security answer*")
+            opening = st.number_input("Opening deposit", min_value=0.0, step=100.0)
+            go = st.form_submit_button("Create account")
+        st.caption(
+            f"Savings: minimum opening deposit and balance {money(MIN_BALANCE['Savings'])}, "
+            f"earns {INTEREST_RATE}% yearly interest. Current: no minimum."
+        )
+        if go:
+            ok, message, acc = bank.create_account(
+                name, username, acc_type, new_pin, confirm_pin, opening, question, answer
+            )
+            if ok:
+                st.success(f"Account created! Account number: {acc.acc_no}")
+                st.info(f"You can log in with your username ({acc.username}) or the account number.")
+            else:
+                st.error(message)
+
+    with tab_forgot:
+        st.write("Forgot your PIN? Answer your security question to set a new one.")
+        if st.session_state.pop("clear_forgot", False):
+            st.session_state["forgot_id"] = ""
+        forgot_id = st.text_input("Username or account number", key="forgot_id").strip()
+        target = bank.find(forgot_id) if forgot_id else None
+        if forgot_id:
+            if target and target.has_security():
+                st.info(f"Security question: {target.sec_question}")
+            else:
+                st.warning("Account not found, or no security question was set. "
+                           "Please contact the admin to reset your PIN.")
+        with st.form("forgot_form"):
+            answer = st.text_input("Your answer")
+            new_pin = st.text_input("New PIN (4-8 digits)", type="password")
+            confirm = st.text_input("Confirm new PIN", type="password")
+            go = st.form_submit_button("Reset PIN")
+        if go:
+            ok, message = bank.reset_pin_with_answer(forgot_id, answer, new_pin, confirm)
+            if ok:
+                st.session_state["clear_forgot"] = True
+                flash("success", message)
+                st.rerun()
+            st.error(message)
 
 
-class Nav(tk.Label):
-    def __init__(self, parent, text, command, active=False):
-        super().__init__(parent, text="  " + text, anchor="w", cursor="hand2", font=(FONT, 12, "bold"),
-                         bg=SOFT if active else CREAM, fg=PURPLE if active else DEEP, pady=9)
-        self.base = self["bg"]
-        self.bind("<Enter>", lambda e: self.config(bg=SOFT))
-        self.bind("<Leave>", lambda e: self.config(bg=self.base))
-        self.bind("<Button-1>", lambda e: command())
+def pick_payee():
+    """Callback: copy the chosen saved payee into the receiver box."""
+    st.session_state["transfer_to"] = st.session_state.get("payee_pick", "")
 
 
-class App:
-    def __init__(self):
-        self.root = tk.Tk()
-        self.root.title("NovaVault Bank")
-        sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
-        self.root.geometry(f"{W}x{H}+{max((sw - W) // 2, 0)}+{max((sh - H) // 2 - 20, 0)}")
-        self.root.resizable(False, False)
-        self.bank = Bank()
-        self.stage = Stage(self.root)
-        self.frames, self.imgs = [], []
-        self.user, self.view, self.hide, self.admin = None, "overview", False, False
-        self.last = time.time()
-        style = ttk.Style()
-        try:
-            style.theme_use("clam")
-        except tk.TclError:
-            pass
-        style.configure("Treeview", background="white", fieldbackground="white", foreground=DEEP, rowheight=27, font=(FONT, 10))
-        style.configure("Treeview.Heading", background=SOFT, foreground=DEEP, font=(FONT, 10, "bold"), relief="flat")
-        style.map("Treeview", background=[("selected", LILAC)], foreground=[("selected", DEEP)])
-        style.configure("TNotebook", background=CREAM, borderwidth=0)
-        style.configure("TNotebook.Tab", font=(FONT, 10, "bold"), padding=(12, 6))
-        self.root.bind_all("<Key>", self.touch)
-        self.root.bind_all("<Button>", self.touch)
-        self.root.after(5000, self.check_timeout)
-        self.show_auth()
-        self.cursor = BubbleCursor(self.root)
+def month_totals(rows):
+    """Money in / money out per month for the statement chart."""
+    months = sorted({r["Date"][:7] for r in rows if r["Date"] != "-"})
+    money_in = {m: 0.0 for m in months}
+    money_out = {m: 0.0 for m in months}
+    for r in rows:
+        month = r["Date"][:7]
+        if month not in money_in:
+            continue
+        if r["Type"] in MONEY_IN:
+            money_in[month] += r["Amount"]
+        elif r["Type"] in MONEY_OUT:
+            money_out[month] += r["Amount"]
+    return {"Money in": money_in, "Money out": money_out}
 
-    def run(self):
-        self.root.mainloop()
 
-    # ----- plumbing -----
-    def touch(self, _e=None):
-        self.last = time.time()
+def user_page(bank, acc):
+    c1, c2 = st.columns([3, 1])
+    c1.subheader(f"Welcome back, {acc.name} 👋")
+    if c2.button("Logout"):
+        logout()
 
-    def check_timeout(self):
-        if (self.user or self.admin) and time.time() - self.last > SESSION_TIMEOUT:
-            self.logout("You were logged out after 10 minutes of inactivity")
-        self.root.after(5000, self.check_timeout)
+    if acc.status != "active":
+        st.error("Your account is frozen. Please contact the admin.")
+    hide = False
+    if hasattr(st, "toggle"):
+        hide = st.toggle("🙈 Hide balance", key="hide_balance")
+    balance_card(acc, hide)
+    st.caption(f"Username: {acc.username or '-'}")
+    if acc.acc_type == "Savings":
+        estimate = round(acc.balance * INTEREST_RATE / 100 / 12, 2)
+        st.caption(f"📈 Earns {INTEREST_RATE}% a year. Estimated interest next month: {money(estimate)}")
+    if acc.lock_seconds_left():
+        st.warning("Payments are paused for a few minutes after too many wrong PINs.")
 
-    def clear(self):
-        for fr in self.frames:
-            try:
-                fr.destroy()
-            except Exception:
-                pass
-        self.frames, self.imgs = [], []
-        for tag in ("card", "ui", "title"):
-            self.stage.delete(tag)
+    m1, m2 = st.columns(2)
+    m1.metric("Daily limit left", money(max(DAILY_LIMIT - acc.today_out(), 0)))
+    m2.metric("Spent today", money(acc.today_out()))
 
-    def card(self, x, y, w, h, pad=22):
-        s = self.stage
-        rrect(s, x + 4, y + 10, x + w + 4, y + h + 10, 30, fill=mix(SOFT, "#6d4bc2", .22), outline="", tags="card")
-        rrect(s, x, y, x + w, y + h, 30, fill=CREAM, outline="white", width=3, tags="card")
-        fr = tk.Frame(s, bg=CREAM)
-        self.frames.append(fr)
-        s.create_window(x + pad, y + pad, window=fr, anchor="nw", width=w - 2 * pad, height=h - 2 * pad, tags="ui")
-        return fr
+    tab_dep, tab_wd, tab_tr, tab_st, tab_pf = st.tabs(
+        ["Deposit", "Withdraw", "Transfer", "Statement", "Profile"]
+    )
 
-    def acc(self):
-        return self.bank.accounts.get(self.user)
+    with tab_dep:
+        with st.form("deposit_form", clear_on_submit=True):
+            amount = st.number_input("Amount", min_value=0.0, max_value=MAX_DEPOSIT, step=100.0)
+            go = st.form_submit_button("Deposit")
+        if go:
+            finish(bank, acc.deposit(amount))
 
-    def logout(self, message="Logged out. See you soon!"):
-        self.user = None
-        self.show_auth()
-        self.stage.toast(message, True)
+    with tab_wd:
+        with st.form("withdraw_form", clear_on_submit=True):
+            amount = st.number_input("Amount", min_value=0.0, step=100.0)
+            pin = st.text_input("Enter your PIN to confirm", type="password")
+            go = st.form_submit_button("Withdraw")
+        if go:
+            ok, error = bank.verify_pin(acc, pin)
+            if ok:
+                finish(bank, acc.withdraw(amount))
+            else:
+                st.error(error)
 
-    def finish(self, result, view=None):
-        ok, message = result[0], result[1]
-        if ok:
-            self.bank.save()
-        self.stage.toast(message, ok)
-        if ok:
-            self.show_user(view or self.view)
-        return ok
-
-    def pin_ok(self, acc, pin):
-        ok, message = self.bank.verify_pin(acc, pin)
-        if not ok:
-            self.stage.toast(message, False)
-        return ok
-
-    def table(self, parent, cols, widths, height=8):
-        t = ttk.Treeview(parent, columns=cols, show="headings", height=height)
-        for c, w in zip(cols, widths):
-            t.heading(c, text=c)
-            t.column(c, width=w, anchor="w")
-        return t
-
-    def avatar(self, parent, acc, size):
-        c = tk.Canvas(parent, width=size, height=size, bg=parent["bg"], highlightthickness=0)
-        path = avatar_path(acc.acc_no)
-        photo = None
-        try:
-            if os.path.exists(path):
-                if HAVE_PIL:
-                    img = Image.open(path).convert("RGBA").resize((size, size))
-                    mask = Image.new("L", (size, size), 0)
-                    ImageDraw.Draw(mask).ellipse((0, 0, size - 1, size - 1), fill=255)
-                    img.putalpha(mask)
-                    photo = ImageTk.PhotoImage(img)
+    with tab_tr:
+        payees = [no for no in acc.payees if no in bank.accounts]
+        if st.session_state.pop("clear_transfer", False):
+            st.session_state["transfer_to"] = ""
+            st.session_state["payee_pick"] = ""
+        if st.session_state.get("payee_pick", "") not in [""] + payees:
+            st.session_state["payee_pick"] = ""
+        if payees:
+            st.selectbox(
+                "Saved payees", [""] + payees, key="payee_pick", on_change=pick_payee,
+                format_func=lambda no: "Choose a saved payee" if not no
+                else f"{bank.accounts[no].name} ({no})",
+            )
+        to_id = st.text_input("Receiver username or account number", key="transfer_to").strip()
+        receiver = bank.find(to_id) if to_id else None
+        if to_id:
+            if receiver is None:
+                st.warning("Account not found")
+            elif receiver.acc_no == acc.acc_no:
+                st.warning("You cannot transfer to your own account")
+            else:
+                st.info(f"Receiver: {receiver.name}")
+        with st.form("transfer_form", clear_on_submit=True):
+            amount = st.number_input("Amount", min_value=0.0, step=100.0)
+            note = st.text_input("Note (optional)", max_chars=60)
+            pin = st.text_input("Enter your PIN to confirm", type="password")
+            save_payee = st.checkbox("Save this receiver for next time")
+            go = st.form_submit_button("Transfer")
+        if go:
+            if receiver is None:
+                st.error("Enter a valid receiver first")
+            else:
+                ok, error = bank.verify_pin(acc, pin)
+                if not ok:
+                    st.error(error)
                 else:
-                    photo = tk.PhotoImage(file=path)
-                    photo = photo.subsample(max(1, photo.width() // size))
-        except Exception:
-            photo = None
-        c.create_oval(1, 1, size - 1, size - 1, fill=PURPLE, outline="white", width=3)
-        if photo is not None:
-            self.imgs.append(photo)
-            c.create_image(size // 2, size // 2, image=photo)
+                    result = acc.send(receiver, amount, note.strip())
+                    if result[0]:
+                        st.session_state["clear_transfer"] = True
+                        if save_payee and receiver.acc_no not in acc.payees:
+                            acc.payees.append(receiver.acc_no)
+                    finish(bank, result)
+
+    with tab_st:
+        today = date.today()
+        first = min((h.get("date", today.isoformat()) for h in acc.history), default=today.isoformat())
+        try:
+            first_day = date.fromisoformat(first)
+        except ValueError:
+            first_day = today
+        f1, f2, f3 = st.columns(3)
+        start = f1.date_input("From", value=first_day, max_value=today)
+        end = f2.date_input("To", value=today, max_value=today)
+        kinds = [""] + sorted({h.get("type", "") for h in acc.history})
+        chosen = f3.selectbox("Type", kinds, format_func=lambda k: "All" if not k else k)
+        search = st.text_input("Search note or reference").strip().lower()
+
+        if start > end:
+            st.error("The 'From' date must be before the 'To' date")
+            rows = []
         else:
-            c.create_text(size // 2, size // 2, text=(acc.name.strip()[:1] or "?").upper(), fill="white",
-                          font=(FONT, size // 2, "bold"))
-        return c
+            rows = [r for r in history_rows(acc.history)
+                    if start.isoformat() <= r["Date"] <= end.isoformat()]
+        if chosen:
+            rows = [r for r in rows if r["Type"] == chosen]
+        if search:
+            rows = [r for r in rows if search in f"{r['Note']} {r['Ref']}".lower()]
 
-    # ----- login / create / forgot -----
-    def show_auth(self, tab="login"):
-        self.clear()
-        self.admin = False
-        s = self.stage
-        s.kinetic("Nova", 70, 150, 78, "title")
-        s.kinetic("Vault", 70, 255, 78, "title", delay=350)
-        s.create_text(74, 340, anchor="nw", text="Your money. Your vault.\nYour rules.", font=(FONT, 20), fill=DEEP, tags="title")
-        for i, t in enumerate(("Hashed PIN", "Instant transfers", f"{INTEREST_RATE}% interest")):
-            x = 74 + i * 150
-            rrect(s, x, 440, x + 138, 478, 19, fill="white", outline="#dccbff", width=2, tags="title")
-            s.create_text(x + 69, 459, text=t, fill=PURPLE, font=(FONT, 10, "bold"), tags="title")
-        fr = self.card(590, 40, 410, 620)
-        bar = tk.Frame(fr, bg=CREAM)
-        bar.pack(fill="x", pady=(0, 10))
-        for key, text in (("login", "Log in"), ("create", "Sign up"), ("forgot", "Forgot PIN")):
-            Pill(bar, text, lambda k=key: self.show_auth(k), w=114, h=38, size=10,
-                 color=PURPLE if key == tab else "#cdb6ff").pack(side="left", padx=2)
-        body = tk.Frame(fr, bg=CREAM)
-        body.pack(fill="both", expand=True)
-        getattr(self, "auth_" + tab)(body)
-        s.reveal()
-
-    def field(self, parent, row, col, text, show="", span=1, width=26):
-        label(parent, text).grid(row=row * 2, column=col, columnspan=span, sticky="w", pady=(8, 2))
-        e = entry(parent, show, width)
-        e.grid(row=row * 2 + 1, column=col, columnspan=span, sticky="ew", padx=(0, 6 if span == 1 and col == 0 else 0), ipady=5)
-        return e
-
-    def auth_login(self, body):
-        body.columnconfigure(0, weight=1)
-        who = self.field(body, 0, 0, "Username or account number")
-        pin = self.field(body, 1, 0, "PIN", "\u2022")
-        def go():
-            acc, message = self.bank.authenticate(who.get(), pin.get())
-            if acc is None:
-                self.stage.toast(message, False)
-                return
-            self.user, self.view, self.last = acc.acc_no, "overview", time.time()
-            self.show_user("overview")
-            self.stage.toast(f"Welcome back, {acc.name.split()[0]}!", True)
-        pin.bind("<Return>", lambda e: go())
-        Pill(body, "Log in", go, w=360, h=50, size=13).grid(row=4, column=0, pady=(24, 10))
-        lk = tk.Label(body, text="Admin login", bg=CREAM, fg=PURPLE, cursor="hand2", font=(FONT, 10, "underline"))
-        lk.grid(row=5, column=0)
-        lk.bind("<Button-1>", lambda e: self.admin_login())
-
-    def auth_create(self, body):
-        body.columnconfigure((0, 1), weight=1)
-        name = self.field(body, 0, 0, "Full name", span=2)
-        user = self.field(body, 1, 0, "Username", span=2)
-        label(body, "Account type").grid(row=4, column=0, sticky="w", pady=(8, 2))
-        typ = ttk.Combobox(body, values=("Savings", "Current"), state="readonly", width=12)
-        typ.set("Savings")
-        typ.grid(row=5, column=0, sticky="ew", padx=(0, 6), ipady=3)
-        opening = self.field(body, 2, 1, "Opening deposit", width=12)
-        pin = self.field(body, 3, 0, "PIN (4-8 digits)", "\u2022", width=12)
-        conf = self.field(body, 3, 1, "Confirm PIN", "\u2022", width=12)
-        label(body, "Security question").grid(row=8, column=0, columnspan=2, sticky="w", pady=(8, 2))
-        q = ttk.Combobox(body, values=SECURITY_QUESTIONS, state="readonly")
-        q.grid(row=9, column=0, columnspan=2, sticky="ew", ipady=3)
-        ans = self.field(body, 5, 0, "Answer", span=2)
-        def go():
-            amount = to_float(opening.get())
-            if amount is None:
-                self.stage.toast("Enter the opening deposit as a number", False)
-                return
-            ok, message, acc = self.bank.create_account(name.get(), user.get(), typ.get(), pin.get(), conf.get(),
-                                                         amount, q.get(), ans.get())
-            self.stage.toast(message, ok)
-            if ok:
-                messagebox.showinfo("Account created", f"Your account number is {acc.acc_no}.\nKeep it safe.")
-                self.show_auth("login")
-        Pill(body, "Create account", go, w=360, h=48, size=12).grid(row=12, column=0, columnspan=2, pady=(18, 0))
-
-    def auth_forgot(self, body):
-        body.columnconfigure(0, weight=1)
-        who = self.field(body, 0, 0, "Username or account number")
-        qlab = label(body, "", size=10, fg=PURPLE, wraplength=350, justify="left")
-        qlab.grid(row=3, column=0, sticky="w", pady=(10, 0))
-        def show_q():
-            acc = self.bank.find(who.get())
-            if acc is None or not acc.has_security():
-                self.stage.toast("Details are incorrect. Contact the admin if you set no question.", False)
-            else:
-                qlab.config(text="Security question: " + acc.sec_question)
-        Pill(body, "Show my question", show_q, w=190, h=36, size=10, color="#a68bff").grid(row=2, column=0, sticky="w", pady=(10, 0))
-        ans = self.field(body, 2, 0, "Answer")
-        pin = self.field(body, 3, 0, "New PIN (4-8 digits)", "\u2022")
-        conf = self.field(body, 4, 0, "Confirm new PIN", "\u2022")
-        def go():
-            ok, message = self.bank.reset_pin_with_answer(who.get(), ans.get(), pin.get(), conf.get())
-            self.stage.toast(message, ok)
-            if ok:
-                self.bank.save()
-                self.show_auth("login")
-        Pill(body, "Reset PIN", go, w=360, h=48, size=12).grid(row=10, column=0, pady=(18, 0))
-
-    # ----- user screens -----
-    def show_user(self, view="overview"):
-        acc = self.acc()
-        if acc is None:
-            self.logout("This account no longer exists")
-            return
-        self.clear()
-        self.view = view
-        side = self.card(30, 40, 240, 620, pad=18)
-        self.avatar(side, acc, 86).pack(pady=(4, 6))
-        label(side, acc.name, size=14).pack(fill="x")
-        label(side, f"A/C {acc.acc_no}", size=9, bold=False, fg="#7a5fc0").pack(fill="x", pady=(0, 14))
-        for key, text in NAV:
-            Nav(side, text, lambda k=key: self.show_user(k), active=key == view).pack(fill="x", pady=2)
-        Pill(side, "Log out", self.logout, w=196, color=CORAL).pack(side="bottom", pady=6)
-        main = self.card(290, 40, 720, 620, pad=26)
-        head = tk.Frame(main, bg=CREAM)
-        head.pack(fill="x")
-        label(head, f"Hi, {acc.name.split()[0]}", size=26).pack(side="left")
-        label(head, datetime.now().strftime("%A, %d %B"), size=10, bold=False, fg="#7a5fc0").pack(side="right", pady=12)
-        if acc.status != "active":
-            label(main, "Your account is frozen. Please contact the admin.", fg="#e11d48").pack(fill="x")
-        body = tk.Frame(main, bg=CREAM)
-        body.pack(fill="both", expand=True, pady=(8, 0))
-        {"overview": self.v_overview, "deposit": lambda b, a: self.v_money(b, a, "Deposit"),
-         "withdraw": lambda b, a: self.v_money(b, a, "Withdraw"), "transfer": self.v_transfer,
-         "statement": self.v_statement, "profile": self.v_profile}[view](body, acc)
-        self.stage.reveal()
-
-    def v_overview(self, body, acc):
-        c = tk.Canvas(body, width=664, height=184, bg=CREAM, highlightthickness=0)
-        c.pack(pady=(0, 10))
-        frozen = acc.status != "active"
-        base = "#8a94a8" if frozen else PURPLE
-        rrect(c, 4, 10, 664, 184, 28, fill=mix(base, "#000000", .25), outline="")
-        rrect(c, 0, 0, 660, 176, 28, fill=base, outline="")
-        rrect(c, 12, 8, 648, 86, 22, fill=mix(base, "#ffffff", .13), outline="")
-        rrect(c, 34, 50, 82, 80, 7, fill="#f6c453", outline="#b9892b")
-        c.create_text(34, 28, anchor="w", fill="#eadfff", font=(FONT, 10, "bold"),
-                      text=f"{acc.acc_type.upper()} ACCOUNT   \u2022   {'FROZEN' if frozen else 'ACTIVE'}")
-        c.create_text(34, 118, anchor="w", fill="white", font=(FONT, 30, "bold"),
-                      text="\u20b9 \u2022\u2022\u2022\u2022\u2022\u2022" if self.hide else money(acc.balance))
-        eye = c.create_text(626, 28, anchor="e", text="Show" if self.hide else "Hide", fill="white", font=(FONT, 10, "underline"))
-        c.tag_bind(eye, "<Button-1>", lambda e: self.toggle_hide())
-        c.create_text(34, 150, anchor="w", fill="#eadfff", font=(FONT, 8, "bold"), text="ACCOUNT NO.")
-        c.create_text(120, 150, anchor="w", fill="white", font=(FONT, 11, "bold"), text=f"{acc.acc_no[:4]} {acc.acc_no[4:]}")
-        c.create_text(626, 150, anchor="e", fill="white", font=(FONT, 11, "bold"), text=acc.name.upper()[:24])
-        row = tk.Frame(body, bg=CREAM)
-        row.pack(fill="x", pady=(0, 8))
-        extra = ("Interest next month", money(round(acc.balance * INTEREST_RATE / 100 / 12, 2))) if acc.acc_type == "Savings" \
-            else ("Minimum balance", money(acc.min_balance()))
-        for t, v in (("Daily limit left", money(max(DAILY_LIMIT - acc.today_out(), 0))), ("Spent today", money(acc.today_out())), extra):
-            box = tk.Frame(row, bg=SOFT, padx=14, pady=8)
-            box.pack(side="left", expand=True, fill="x", padx=3)
-            label(box, t, size=9, bold=False, fg="#7a5fc0").pack(fill="x")
-            label(box, v, size=13).pack(fill="x")
-        label(body, "Recent transactions", size=12).pack(fill="x", pady=(8, 4))
-        tree = self.table(body, ("Date", "Type", "Amount", "Balance", "Ref"), (110, 130, 120, 130, 140), 6)
-        tree.pack(fill="x")
-        for h in list(reversed(acc.history))[:6]:
-            tree.insert("", "end", values=(h.get("date", "-"), h.get("type", ""), f"{h.get('amount', 0):,.2f}",
-                                           f"{h.get('balance', 0):,.2f}", h.get("ref", "-")))
-
-    def toggle_hide(self):
-        self.hide = not self.hide
-        self.show_user("overview")
-
-    def v_money(self, body, acc, kind):
-        label(body, kind, size=20).pack(fill="x", pady=(6, 0))
-        note = f"Maximum single deposit {money(MAX_DEPOSIT)}" if kind == "Deposit" else \
-            f"Minimum balance {money(acc.min_balance())}  \u2022  Daily limit left {money(max(DAILY_LIMIT - acc.today_out(), 0))}"
-        label(body, note, size=10, bold=False, fg="#7a5fc0").pack(fill="x", pady=(0, 10))
-        label(body, "Amount (\u20b9)").pack(fill="x")
-        amt = entry(body, width=34)
-        amt.pack(anchor="w", ipady=6, pady=(2, 10))
-        label(body, "PIN to confirm").pack(fill="x")
-        pin = entry(body, "\u2022", 34)
-        pin.pack(anchor="w", ipady=6, pady=(2, 18))
-        def go():
-            amount = to_float(amt.get())
-            if amount is None:
-                self.stage.toast("Enter the amount as a number", False)
-            elif self.pin_ok(acc, pin.get()):
-                self.finish(acc.deposit(amount) if kind == "Deposit" else acc.withdraw(amount))
-        Pill(body, kind, go, w=250, h=50, size=13).pack(anchor="w")
-
-    def v_transfer(self, body, acc):
-        label(body, "Send money", size=20).pack(fill="x", pady=(6, 6))
-        saved = [no for no in acc.payees if no in self.bank.accounts]
-        label(body, "Receiver (username, account number or saved payee)").pack(fill="x")
-        who = ttk.Combobox(body, values=[f"{self.bank.accounts[no].name} ({no})" for no in saved], width=44)
-        who.pack(anchor="w", ipady=4, pady=(2, 8))
-        label(body, "Amount (\u20b9)").pack(fill="x")
-        amt = entry(body, width=34)
-        amt.pack(anchor="w", ipady=5, pady=(2, 8))
-        label(body, "Note (optional)").pack(fill="x")
-        note = entry(body, width=34)
-        note.pack(anchor="w", ipady=5, pady=(2, 8))
-        label(body, "PIN to confirm").pack(fill="x")
-        pin = entry(body, "\u2022", 34)
-        pin.pack(anchor="w", ipady=5, pady=(2, 14))
-        def go():
-            text = who.get().strip()
-            m = re.search(r"\((\d+)\)$", text)
-            target = self.bank.find(m.group(1) if m else text)
-            amount = to_float(amt.get())
-            if target is None:
-                self.stage.toast("Receiver not found", False)
-            elif amount is None:
-                self.stage.toast("Enter the amount as a number", False)
-            elif self.pin_ok(acc, pin.get()):
-                if self.finish(acc.send(target, amount, note.get().strip()[:40]), "transfer") and target.acc_no not in acc.payees:
-                    if messagebox.askyesno("Save payee", f"Save {target.name} as a payee for next time?"):
-                        acc.payees.append(target.acc_no)
-                        self.bank.save()
-        Pill(body, "Send money", go, w=250, h=50, size=13).pack(anchor="w")
-
-    def v_statement(self, body, acc):
-        bar = tk.Frame(body, bg=CREAM)
-        bar.pack(fill="x", pady=(4, 6))
-        kinds = ["All"] + sorted({h.get("type", "") for h in acc.history})
-        label(bar, "Type").grid(row=0, column=0, sticky="w")
-        typ = ttk.Combobox(bar, values=kinds, state="readonly", width=15)
-        typ.set("All")
-        typ.grid(row=1, column=0, padx=(0, 8), ipady=3)
-        label(bar, "From (YYYY-MM-DD)").grid(row=0, column=1, sticky="w")
-        d1 = entry(bar, width=14)
-        d1.grid(row=1, column=1, padx=(0, 8), ipady=4)
-        label(bar, "To").grid(row=0, column=2, sticky="w")
-        d2 = entry(bar, width=14)
-        d2.grid(row=1, column=2, padx=(0, 8), ipady=4)
-        tree = self.table(body, ("Date", "Time", "Type", "Amount", "Balance", "Ref"), (90, 80, 120, 110, 120, 130), 12)
-        info = label(body, "", size=10, fg="#7a5fc0")
-        shown = []
-        def refresh():
-            for box in (d1, d2):
-                text = box.get().strip()
-                if text:
-                    try:
-                        datetime.strptime(text, "%Y-%m-%d")
-                    except ValueError:
-                        self.stage.toast("Dates must look like 2026-11-23", False)
-                        return
-            shown.clear()
-            for h in acc.history:
-                day = h.get("date", "")
-                if typ.get() not in ("All", h.get("type", "")) or (d1.get().strip() and day < d1.get().strip()) \
-                        or (d2.get().strip() and day > d2.get().strip()):
-                    continue
-                shown.append(h)
-            tree.delete(*tree.get_children())
-            for h in reversed(shown):
-                tree.insert("", "end", values=(h.get("date", "-"), h.get("time", "-"), h.get("type", ""),
-                                               f"{h.get('amount', 0):,.2f}", f"{h.get('balance', 0):,.2f}", h.get("ref", "-")))
-            tin = sum(h["amount"] for h in shown if h.get("type") in MONEY_IN)
-            tout = sum(h["amount"] for h in shown if h.get("type") in MONEY_OUT)
-            info.config(text=f"{len(shown)} transactions   \u2022   Money in {money(tin)}   \u2022   Money out {money(tout)}")
-        def export():
-            path = filedialog.asksaveasfilename(defaultextension=".csv", initialfile=f"statement_{acc.acc_no}.csv",
-                                                filetypes=[("CSV file", "*.csv")])
-            if path:
-                with open(path, "w", newline="", encoding="utf-8") as f:
-                    w = csv.writer(f)
-                    w.writerow(["Date", "Time", "Type", "Amount", "Balance", "Note", "Ref"])
-                    for h in shown:
-                        w.writerow([h.get("date", ""), h.get("time", ""), h.get("type", ""), h.get("amount", 0),
-                                    h.get("balance", 0), h.get("note", ""), h.get("ref", "")])
-                self.stage.toast("Statement saved", True)
-        Pill(bar, "Show", refresh, w=90, h=38, size=10).grid(row=1, column=3, padx=4)
-        Pill(bar, "Save CSV", export, w=110, h=38, size=10, color=PINK).grid(row=1, column=4)
-        tree.pack(fill="both", expand=True)
-        info.pack(fill="x", pady=(6, 0))
-        refresh()
-
-    def v_profile(self, body, acc):
-        nb = ttk.Notebook(body)
-        nb.pack(fill="both", expand=True)
-        def tab(name):
-            f = tk.Frame(nb, bg=CREAM, padx=14, pady=12)
-            nb.add(f, text=name)
-            return f
-        t = tab("Details")
-        self.avatar(t, acc, 96).grid(row=0, column=0, rowspan=4, padx=(0, 18), sticky="n")
-        for i, (k, v) in enumerate((("Name", acc.name), ("Username", acc.username or "-"), ("Account number", acc.acc_no),
-                                    ("Type", acc.acc_type), ("Opened on", acc.created or "-"), ("Status", acc.status.title()))):
-            label(t, f"{k}:  {v}", size=11, bold=False).grid(row=i, column=1, sticky="w", pady=1)
-        def pick():
-            path = filedialog.askopenfilename(filetypes=[("Images", "*.png *.jpg *.jpeg"), ("All files", "*.*")])
-            if path:
-                self.finish(save_avatar(acc.acc_no, path), "profile")
-        def drop():
-            remove_avatar(acc.acc_no)
-            self.finish((True, "Profile photo removed"), "profile")
-        Pill(t, "Change photo", pick, w=170, h=40, size=10).grid(row=7, column=0, columnspan=2, sticky="w", pady=(18, 0))
-        if os.path.exists(avatar_path(acc.acc_no)):
-            Pill(t, "Remove photo", drop, w=170, h=40, size=10, color=CORAL).grid(row=8, column=0, columnspan=2, sticky="w", pady=6)
-        t = tab("Change PIN")
-        old, new, conf = (self.field(t, i, 0, txt, "\u2022", width=30) for i, txt in
-                          enumerate(("Current PIN", "New PIN (4-8 digits)", "Confirm new PIN")))
-        def change():
-            if not self.pin_ok(acc, old.get()):
-                return
-            if not valid_pin(new.get()):
-                self.stage.toast("PIN must be 4 to 8 digits", False)
-            elif new.get() != conf.get():
-                self.stage.toast("PINs do not match", False)
-            else:
-                acc.set_pin(new.get())
-                self.bank.log(acc.acc_no, "PIN changed")
-                self.finish((True, "PIN changed"), "profile")
-        Pill(t, "Change PIN", change, w=200, h=44).grid(row=8, column=0, sticky="w", pady=16)
-        t = tab("Security question")
-        label(t, "Used to reset your PIN if you forget it.", bold=False).grid(row=0, column=0, sticky="w")
-        q = ttk.Combobox(t, values=SECURITY_QUESTIONS, state="readonly", width=40)
-        q.grid(row=1, column=0, sticky="w", ipady=3, pady=6)
-        ans = self.field(t, 1, 0, "Answer", width=30)
-        pin = self.field(t, 2, 0, "PIN to confirm", "\u2022", width=30)
-        def setq():
-            if not q.get() or len(ans.get().strip()) < 3:
-                self.stage.toast("Choose a question and an answer of 3+ characters", False)
-            elif self.pin_ok(acc, pin.get()):
-                acc.set_security(q.get(), ans.get())
-                self.bank.log(acc.acc_no, "Security question updated")
-                self.finish((True, "Security question saved"), "profile")
-        Pill(t, "Save", setq, w=160, h=44).grid(row=8, column=0, sticky="w", pady=14)
-        t = tab("Payees")
-        saved = [no for no in acc.payees if no in self.bank.accounts]
-        lb = tk.Listbox(t, height=7, width=46, font=(FONT, 11), relief="flat", highlightthickness=2, highlightbackground="#dccbff")
-        for no in saved:
-            lb.insert("end", f"{self.bank.accounts[no].name} ({no})")
-        lb.pack(anchor="w")
-        def remove():
-            if lb.curselection():
-                acc.payees.remove(saved[lb.curselection()[0]])
-                self.finish((True, "Payee removed"), "profile")
-        Pill(t, "Remove selected", remove, w=190, h=40, size=10, color=CORAL).pack(anchor="w", pady=10)
-        t = tab("Close account")
-        label(t, f"Closing pays out your remaining balance ({money(acc.balance)}) and cannot be undone.",
-              fg="#e11d48", wraplength=560, justify="left").pack(fill="x", pady=(0, 10))
-        pin = entry(t, "\u2022", 30)
-        label(t, "PIN to confirm").pack(anchor="w")
-        pin.pack(anchor="w", ipady=5, pady=(2, 12))
-        def close():
-            if self.pin_ok(acc, pin.get()) and messagebox.askyesno("Close account", "Really close your account?"):
-                self.bank.delete_account(acc.acc_no, acc.acc_no)
-                self.user = None
-                self.show_auth()
-                self.stage.toast("Your account has been closed", True)
-        Pill(t, "Close my account", close, w=220, h=44, color=CORAL).pack(anchor="w")
-
-    # ----- admin -----
-    def admin_login(self):
-        pw = simpledialog.askstring("Admin login", "Admin password", show="\u2022", parent=self.root)
-        if pw is None:
-            return
-        ok, message = self.bank.admin_login(pw, get_admin_password())
-        if ok:
-            self.show_admin()
+        total_in, total_out = 0.0, 0.0
+        for r in rows:
+            if r["Type"] in MONEY_IN:
+                total_in += r["Amount"]
+            elif r["Type"] in MONEY_OUT:
+                total_out += r["Amount"]
+        s1, s2, s3 = st.columns(3)
+        s1.metric("Money in", money(total_in))
+        s2.metric("Money out", money(total_out))
+        s3.metric("Transactions", len(rows))
+        if rows:
+            st.dataframe(rows)
+            if len(rows) > 1:
+                st.markdown("##### Money in and out by month")
+                st.bar_chart(month_totals(rows))
+                st.markdown("##### Balance trend")
+                st.line_chart({"Balance": [r["Balance"] for r in reversed(rows)]})
+            d1, d2 = st.columns(2)
+            d1.download_button("Download statement (PDF)",
+                               statement_pdf(acc, rows, start.isoformat(), end.isoformat()),
+                               file_name=f"statement_{acc.acc_no}.pdf", mime="application/pdf")
+            d2.download_button("Download statement (CSV)", rows_to_csv(rows),
+                               file_name=f"statement_{acc.acc_no}.csv", mime="text/csv")
         else:
-            self.stage.toast(message, False)
+            st.info("No transactions for these filters.")
 
-    def show_admin(self):
-        self.clear()
-        self.admin, self.last = True, time.time()
-        fr = self.card(30, 40, 980, 620, pad=26)
-        top = tk.Frame(fr, bg=CREAM)
-        top.pack(fill="x")
-        label(top, "Admin console", size=24).pack(side="left")
-        Pill(top, "Log out", self.show_auth, w=120, h=38, color=CORAL, size=10).pack(side="right")
-        self.stats = label(fr, "", size=10, bold=False, fg="#7a5fc0")
-        self.stats.pack(fill="x", pady=(2, 6))
-        self.search = entry(fr, width=40)
-        self.search.pack(anchor="w", ipady=4, pady=(0, 8))
-        self.search.bind("<KeyRelease>", lambda e: self.fill_admin())
-        bar = tk.Frame(fr, bg=CREAM)
-        bar.pack(side="bottom", fill="x", pady=(8, 0))
-        self.atree = self.table(fr, ("Account", "Name", "Username", "Type", "Balance", "Status"), (100, 210, 160, 100, 140, 100), 10)
-        self.atree.pack(fill="x")
-        acts = (("Freeze / unfreeze", self.a_freeze), ("Unlock", self.a_unlock), ("Reset PIN", self.a_pin), ("History", self.a_hist),
-                ("Delete", self.a_delete), ("Apply interest", self.a_interest), ("Audit log", self.a_audit),
-                ("Backup", self.a_backup), ("Restore", self.a_restore))
-        for i, (text, fn) in enumerate(acts):
-            Pill(bar, text, fn, w=168, h=38, size=10, color=CORAL if text == "Delete" else PURPLE).grid(
-                row=i // 5, column=i % 5, padx=(0, 10), pady=4, sticky="w")
-        self.fill_admin()
-        self.stage.reveal()
+    with tab_pf:
+        st.write(f"**Name:** {acc.name}")
+        st.write(f"**Username:** {acc.username or '-'}")
+        st.write(f"**Account number:** {acc.acc_no}")
+        st.write(f"**Account type:** {acc.acc_type}")
+        st.write(f"**Opened on:** {acc.created or '-'}")
+        st.write(f"**Status:** {acc.status.title()}")
 
-    def fill_admin(self):
-        q = self.search.get().strip().lower()
-        self.atree.delete(*self.atree.get_children())
-        for a in self.bank.accounts.values():
-            if q in f"{a.name} {a.username} {a.acc_no}".lower():
-                self.atree.insert("", "end", values=(a.acc_no, a.name, a.username, a.acc_type, f"{a.balance:,.2f}", a.status))
-        accs = list(self.bank.accounts.values())
-        self.stats.config(text=f"{len(accs)} accounts   \u2022   Total money {money(self.bank.total_balance())}   \u2022   "
-                               f"{sum(1 for a in accs if a.status != 'active')} frozen   \u2022   {sum(1 for a in accs if a.lock_seconds_left())} locked")
+        saved = [no for no in acc.payees if no in bank.accounts]
+        if saved:
+            st.markdown("##### Saved payees")
+            with st.form("remove_payee_form", clear_on_submit=True):
+                gone = st.selectbox("Payee", saved, format_func=lambda no: f"{bank.accounts[no].name} ({no})")
+                go = st.form_submit_button("Remove payee")
+            if go:
+                acc.payees = [no for no in acc.payees if no != gone]
+                finish(bank, (True, "Payee removed"))
 
-    def picked(self):
-        sel = self.atree.selection()
-        acc = self.bank.accounts.get(str(self.atree.item(sel[0])["values"][0])) if sel else None
-        if acc is None:
-            self.stage.toast("Select an account first", False)
-        return acc
-
-    def a_done(self, message):
-        self.bank.save()
-        self.fill_admin()
-        self.stage.toast(message, True)
-
-    def a_freeze(self):
-        acc = self.picked()
-        if acc:
-            acc.status = "active" if acc.status == "frozen" else "frozen"
-            self.bank.log("admin", f"Account {acc.acc_no} set to {acc.status}")
-            self.a_done(f"Account is now {acc.status}")
-
-    def a_unlock(self):
-        acc = self.picked()
-        if acc:
-            acc.unlock()
-            self.bank.log("admin", f"Account {acc.acc_no} unlocked")
-            self.a_done("Account unlocked")
-
-    def a_pin(self):
-        acc = self.picked()
-        if acc:
-            pin = simpledialog.askstring("Reset PIN", "New PIN for this user (4-8 digits)", show="\u2022", parent=self.root)
-            if pin is None:
-                return
-            if valid_pin(pin):
-                acc.set_pin(pin)
-                acc.unlock()
-                self.bank.log("admin", f"PIN reset for account {acc.acc_no}")
-                self.a_done("PIN reset done")
+        st.markdown("##### Change PIN")
+        with st.form("change_pin_form", clear_on_submit=True):
+            old_pin = st.text_input("Current PIN", type="password")
+            new_pin = st.text_input("New PIN (4-8 digits)", type="password")
+            confirm = st.text_input("Confirm new PIN", type="password")
+            go = st.form_submit_button("Change PIN")
+        if go:
+            if not acc.check_pin(old_pin):
+                st.error("Current PIN is incorrect")
+            elif not valid_pin(new_pin):
+                st.error("PIN must be 4 to 8 digits")
+            elif new_pin != confirm:
+                st.error("New PINs do not match")
             else:
-                self.stage.toast("PIN must be 4 to 8 digits", False)
+                acc.set_pin(new_pin)
+                bank.log(acc.acc_no, "PIN changed")
+                finish(bank, (True, "PIN changed successfully"))
 
-    def popup(self, title, text):
-        win = tk.Toplevel(self.root)
-        win.title(title)
-        box = tk.Text(win, width=100, height=26, font=("Consolas", 10), bg="white", fg=DEEP)
-        box.insert("1.0", text)
-        box.config(state="disabled")
-        box.pack(padx=10, pady=10)
+        st.markdown("##### Security question (for forgot PIN)")
+        if acc.has_security():
+            st.caption(f"Current question: {acc.sec_question}")
+        else:
+            st.warning("No security question set yet. Set one so you can reset a forgotten PIN.")
+        with st.form("security_form", clear_on_submit=True):
+            question = st.selectbox("Question", SECURITY_QUESTIONS)
+            answer = st.text_input("Answer")
+            pin_check = st.text_input("Enter your PIN to confirm", type="password")
+            go = st.form_submit_button("Save security question")
+        if go:
+            if not acc.check_pin(pin_check):
+                st.error("Incorrect PIN")
+            elif len(answer.strip()) < 3:
+                st.error("Answer must be at least 3 characters")
+            else:
+                acc.set_security(question, answer)
+                bank.log(acc.acc_no, "Security question updated")
+                finish(bank, (True, "Security question saved"))
 
-    def a_hist(self):
-        acc = self.picked()
-        if acc:
-            lines = [f"{h.get('date', '')} {h.get('time', '')}  {h.get('type', ''):14} {h.get('amount', 0):>12,.2f} "
-                     f"{h.get('balance', 0):>13,.2f}  {h.get('ref', '')}" for h in reversed(acc.history)]
-            self.popup(f"History - {acc.name}", "\n".join(lines) or "No transactions.")
-
-    def a_delete(self):
-        acc = self.picked()
-        if acc and messagebox.askyesno("Delete account", f"Delete {acc.name} ({acc.acc_no}) for good?"):
-            self.bank.delete_account(acc.acc_no, "admin")
-            self.a_done("Account deleted")
-
-    def a_interest(self):
-        ok, message = self.bank.apply_interest()
-        self.bank.save()
-        self.fill_admin()
-        self.stage.toast(message, ok)
-
-    def a_audit(self):
-        self.popup("Audit log", "\n".join(f"{e['time']}  {e['who']:12} {e['event']}" for e in reversed(self.bank.audit[-100:])) or "No events yet.")
-
-    def a_backup(self):
-        path = filedialog.asksaveasfilename(defaultextension=".json", initialfile="bank_backup.json", filetypes=[("JSON", "*.json")])
-        if path:
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(self.bank.export_backup())
-            self.stage.toast("Backup saved", True)
-
-    def a_restore(self):
-        path = filedialog.askopenfilename(filetypes=[("JSON", "*.json")])
-        if path and messagebox.askyesno("Restore", "This replaces ALL current data. Continue?"):
-            with open(path, encoding="utf-8") as f:
-                ok, message = self.bank.restore_backup(f.read())
-            self.fill_admin()
-            self.stage.toast(message, ok)
+        st.markdown("##### Close account")
+        st.warning(
+            f"Closing the account pays out your remaining balance ({money(acc.balance)}) "
+            "and cannot be undone."
+        )
+        with st.form("close_form"):
+            pin_check = st.text_input("Enter your PIN to confirm", type="password")
+            sure = st.checkbox("Yes, close my account")
+            go = st.form_submit_button("Close my account")
+        if go:
+            if not sure:
+                st.error("Please tick the checkbox first")
+            elif not acc.check_pin(pin_check):
+                st.error("Incorrect PIN")
+            else:
+                bank.delete_account(acc.acc_no, acc.acc_no)
+                st.session_state["user"] = None
+                st.session_state["role"] = None
+                flash("success", "Your account has been closed")
+                st.rerun()
 
 
+def admin_page(bank):
+    c1, c2 = st.columns([3, 1])
+    c1.subheader("🛡️ Admin Console")
+    if c2.button("Logout"):
+        logout()
+
+    tab_dash, tab_acc, tab_int, tab_audit, tab_bk = st.tabs(
+        ["Dashboard", "Accounts", "Interest", "Audit log", "Backup"]
+    )
+    accounts = list(bank.accounts.values())
+
+    with tab_dash:
+        frozen = 0
+        locked = 0
+        for a in accounts:
+            if a.status != "active":
+                frozen += 1
+            if a.lock_seconds_left():
+                locked += 1
+        d1, d2 = st.columns(2)
+        d1.metric("Accounts", len(accounts))
+        d2.metric("Total money", money(bank.total_balance()))
+        d3, d4 = st.columns(2)
+        d3.metric("Frozen", frozen)
+        d4.metric("Locked", locked)
+
+        if accounts:
+            st.markdown("##### Balances")
+            st.bar_chart({"Balance": {f"{a.name} ({a.acc_no})": a.balance for a in accounts}})
+            recent = []
+            for a in accounts:
+                for h in a.history:
+                    recent.append({"Account": a.acc_no, "Name": a.name,
+                                   "Date": h.get("date", "-"), "Time": h.get("time", "-"),
+                                   "Type": h.get("type", ""), "Amount": h.get("amount", 0)})
+            recent.sort(key=lambda r: (r["Date"], r["Time"]), reverse=True)
+            st.markdown("##### Latest transactions")
+            st.dataframe(recent[:10])
+
+    with tab_acc:
+        if not accounts:
+            st.info("There are no accounts yet.")
+        else:
+            query = st.text_input("Search by name, username or account number").strip().lower()
+            matches = []
+            for a in accounts:
+                text = f"{a.name} {a.username} {a.acc_no}".lower()
+                if query in text:
+                    matches.append(a)
+            st.dataframe([{
+                "Account": a.acc_no, "Name": a.name, "Username": a.username,
+                "Type": a.acc_type, "Balance": a.balance, "Status": a.status,
+            } for a in matches])
+
+            if matches:
+                st.divider()
+                target = st.selectbox(
+                    "Select account", [a.acc_no for a in matches],
+                    format_func=lambda no: f"{no} - {bank.accounts[no].name}",
+                )
+                acc = bank.accounts[target]
+                st.write(f"**{acc.name}**  |  {acc.acc_type}  |  {money(acc.balance)}  |  {acc.status}")
+
+                with st.expander("Transaction history"):
+                    if acc.history:
+                        st.dataframe(history_rows(acc.history))
+                    else:
+                        st.write("No transactions.")
+
+                b1, b2 = st.columns(2)
+                label = "Unfreeze account" if acc.status == "frozen" else "Freeze account"
+                if b1.button(label):
+                    acc.status = "active" if acc.status == "frozen" else "frozen"
+                    bank.log("admin", f"Account {acc.acc_no} set to {acc.status}")
+                    finish(bank, (True, f"Account is now {acc.status}"))
+                if b2.button("Unlock account"):
+                    acc.unlock()
+                    bank.log("admin", f"Account {acc.acc_no} unlocked")
+                    finish(bank, (True, "Account unlocked"))
+
+                with st.form("reset_pin_form", clear_on_submit=True):
+                    temp_pin = st.text_input("New PIN for this user (4-8 digits)", type="password")
+                    go = st.form_submit_button("Reset PIN")
+                if go:
+                    if valid_pin(temp_pin):
+                        acc.set_pin(temp_pin)
+                        acc.unlock()
+                        bank.log("admin", f"PIN reset for account {acc.acc_no}")
+                        finish(bank, (True, "PIN reset done"))
+                    else:
+                        st.error("PIN must be 4 to 8 digits")
+
+                sure = st.checkbox("Yes, I want to delete this account", key="admin_delete_ok")
+                if st.button("Delete account", type="primary"):
+                    if sure:
+                        bank.delete_account(acc.acc_no, "admin")
+                        finish(bank, (True, "Account deleted"))
+                    else:
+                        st.warning("Please tick the checkbox first")
+
+    with tab_int:
+        st.write(f"Savings accounts earn {INTEREST_RATE}% yearly interest, added monthly.")
+        st.caption(f"Last applied for month: {bank.meta.get('last_interest_month') or 'never'}")
+        if st.button("Apply this month's interest"):
+            finish(bank, bank.apply_interest())
+
+    with tab_audit:
+        if bank.audit:
+            st.dataframe(list(reversed(bank.audit[-100:])))
+        else:
+            st.write("No events yet.")
+
+    with tab_bk:
+        st.write("Streamlit Cloud can reset files when the app restarts, so download a backup regularly.")
+        st.download_button("Download backup", bank.export_backup(),
+                           file_name="bank_backup.json", mime="application/json")
+        uploaded = st.file_uploader("Restore from backup file", type=["json"])
+        sure = st.checkbox("Yes, replace all current data with this backup", key="restore_ok")
+        if st.button("Restore backup"):
+            if uploaded is None:
+                st.error("Choose a backup file first")
+            elif not sure:
+                st.warning("Please tick the checkbox first")
+            else:
+                finish(bank, bank.restore_backup(uploaded.getvalue().decode("utf-8", "ignore")))
+
+
+# =====================================================================
+#                                MAIN
+# =====================================================================
 def main():
-    App().run()
+    st.set_page_config(page_title="NovaVault Bank", page_icon="💠")
+    if "user" not in st.session_state:
+        st.session_state["user"] = None
+        st.session_state["role"] = None
+
+    if st.session_state["user"] is None:
+        st.session_state.pop("last_active", None)
+    else:                                          # auto logout after a period of inactivity
+        now = time.time()
+        if now - st.session_state.get("last_active", now) > SESSION_TIMEOUT:
+            flash("info", "You were logged out after 10 minutes of inactivity.")
+            logout()
+        st.session_state["last_active"] = now
+
+    bank = Bank()
+    inject_css()
+    render_header(st.session_state["user"] is not None)
+    show_flash()
+
+    if st.session_state["user"] is None:
+        login_page(bank)
+    elif st.session_state["role"] == "admin":
+        admin_page(bank)
+    else:
+        acc = bank.accounts.get(st.session_state["user"])
+        if acc is None:     # deleted by admin or data was reset
+            st.session_state["user"] = None
+            st.session_state["role"] = None
+            flash("error", "This account no longer exists.")
+            st.rerun()
+        else:
+            user_page(bank, acc)
+
+    render_footer()
 
 
 if __name__ == "__main__":
