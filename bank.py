@@ -10,16 +10,18 @@ filters, charts and PDF / CSV download, savings interest, admin console,
 backup / restore, auto logout after 10 minutes.
 """
 import csv
+import functools
 import hashlib
 import hmac
-import html
 import io
 import json
 import os
-import random
 import re
+import secrets
+import threading
 import time
-from datetime import date, datetime
+import unicodedata
+from datetime import date, datetime, timedelta, timezone
 
 import streamlit as st
 
@@ -32,6 +34,11 @@ MAX_ATTEMPTS = 3               # wrong PINs before lock
 LOCK_SECONDS = 300             # lock time (5 minutes)
 INTEREST_RATE = 4.0            # yearly % for Savings accounts
 SESSION_TIMEOUT = 600        # auto logout after 10 minutes without activity
+MIN_AGE = 18                   # only adults can open an account
+MAX_AGE = 110                  # sanity limit for the date of birth
+MAX_LOCK_SECONDS = 86400       # lock time doubles after every lock, up to 24 hours
+IST = timezone(timedelta(hours=5, minutes=30))   # India time, so "today" matches the user's day
+BANK_LOCK = threading.RLock()  # one money operation at a time (many users can be online together)
 SECURITY_QUESTIONS = [
     "What is your pet's name?",
     "What is your mother's maiden name?",
@@ -47,8 +54,70 @@ def money(value):
     return f"₹ {value:,.2f}"
 
 
+def now_ist():
+    return datetime.now(IST)
+
+
+def today_ist():
+    return now_ist().date()
+
+
+def locked(func):
+    """Run a method while holding the bank lock (stops two users changing data at once)."""
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        with BANK_LOCK:
+            return func(*args, **kwargs)
+    return wrapper
+
+
 def valid_pin(pin):
-    return pin.isdigit() and 4 <= len(pin) <= 8
+    return pin.isascii() and pin.isdigit() and 4 <= len(pin) <= 8
+
+
+def pin_error(pin):
+    """Return a problem text if this PIN is not allowed, else None."""
+    if not valid_pin(pin):
+        return "PIN must be 4 to 8 digits"
+    if len(set(pin)) == 1:
+        return "PIN is too easy (same digit repeated). Choose another one"
+    digits = "0123456789"
+    if pin in digits or pin in digits[::-1]:
+        return "PIN is too easy (like 1234). Choose another one"
+    return None
+
+
+def calc_age(born, on=None):
+    """Age in full years on a given day (default: today in India)."""
+    on = on or today_ist()
+    years = on.year - born.year
+    if (on.month, on.day) < (born.month, born.day):
+        years -= 1
+    return years
+
+
+def name_error(name):
+    """Names come from users and are shown on screen, so keep them clean."""
+    if not 2 <= len(name) <= 50:
+        return "Name must be 2 to 50 characters"
+    for ch in name:
+        ok = unicodedata.category(ch)[0] in ("L", "M") or ch in " .'-"
+        if not ok:
+            return "Name can only have letters, spaces and . ' -"
+    if sum(ch.isalpha() for ch in name) < 2:
+        return "Please enter your full name"
+    return None
+
+
+def clean_note(text):
+    """Remove control characters from free text."""
+    return "".join(ch for ch in text if ch.isprintable()).strip()
+
+
+def csv_safe(value):
+    """Stop Excel from running a cell that starts with = + - @ (CSV injection)."""
+    text = str(value)
+    return "'" + text if text[:1] in ("=", "+", "-", "@", "\t", "\r") else text
 
 
 def new_ref():
@@ -73,7 +142,8 @@ class Account:
     def __init__(self, acc_no, name, username, acc_type, salt, pin_hash,
                  balance=0.0, status="active", history=None,
                  failed_attempts=0, locked_until=0.0, created="",
-                 sec_question="", sec_salt="", sec_hash="", payees=None):
+                 sec_question="", sec_salt="", sec_hash="", payees=None,
+                 dob="", lock_count=0, last_login="", prev_login=""):
         self.acc_no = acc_no
         self.name = name
         self.username = username
@@ -90,6 +160,10 @@ class Account:
         self.sec_salt = sec_salt
         self.sec_hash = sec_hash
         self.payees = payees if payees is not None else []   # saved receivers (account numbers)
+        self.dob = dob                     # date of birth, "YYYY-MM-DD" (old accounts: empty)
+        self.lock_count = lock_count       # how many times in a row the account got locked
+        self.last_login = last_login
+        self.prev_login = prev_login       # the login before this one, shown to the user
 
     # ---------- saving / loading ----------
     @classmethod
@@ -111,6 +185,10 @@ class Account:
             sec_salt=d.get("sec_salt", ""),
             sec_hash=d.get("sec_hash", ""),
             payees=list(d.get("payees", [])),
+            dob=d.get("dob", ""),
+            lock_count=int(d.get("lock_count", 0)),
+            last_login=d.get("last_login", ""),
+            prev_login=d.get("prev_login", ""),
         )
 
     def to_dict(self):
@@ -130,6 +208,10 @@ class Account:
             "sec_salt": self.sec_salt,
             "sec_hash": self.sec_hash,
             "payees": self.payees,
+            "dob": self.dob,
+            "lock_count": self.lock_count,
+            "last_login": self.last_login,
+            "prev_login": self.prev_login,
         }
 
     # ---------- PIN security ----------
@@ -139,7 +221,7 @@ class Account:
         ).hex()
 
     def set_pin(self, pin):
-        self.salt = os.urandom(8).hex()
+        self.salt = os.urandom(16).hex()
         self.pin_hash = self._hash(pin)
 
     def check_pin(self, pin):
@@ -156,16 +238,25 @@ class Account:
         left = int(self.locked_until - time.time())
         return left if left > 0 else 0
 
+    def lock_text(self):
+        left = self.lock_seconds_left()
+        if left >= 3600:
+            return f"{-(-left // 3600)} hour(s)"
+        return f"{max(-(-left // 60), 1)} minute(s)"
+
     def register_failure(self):
         self.failed_attempts += 1
         if self.failed_attempts >= MAX_ATTEMPTS:
-            self.locked_until = time.time() + LOCK_SECONDS
+            self.lock_count = min(self.lock_count + 1, 20)
+            wait = min(LOCK_SECONDS * 2 ** (self.lock_count - 1), MAX_LOCK_SECONDS)
+            self.locked_until = time.time() + wait   # 5 min, then 10, 20 ... up to 24 hours
             self.failed_attempts = 0
             return True       # now locked
         return False
 
     def unlock(self):
         self.failed_attempts = 0
+        self.lock_count = 0
         self.locked_until = 0.0
 
     # ---------- security question (forgot PIN) ----------
@@ -180,7 +271,7 @@ class Account:
 
     def set_security(self, question, answer):
         self.sec_question = question
-        self.sec_salt = os.urandom(8).hex()
+        self.sec_salt = os.urandom(16).hex()
         self.sec_hash = self._hash_answer(answer)
 
     def check_answer(self, answer):
@@ -193,7 +284,7 @@ class Account:
         return MIN_BALANCE.get(self.acc_type, 0.0)
 
     def _log(self, kind, amount, note="", ref=""):
-        now = datetime.now()
+        now = now_ist()
         ref = ref or new_ref()
         self.history.append({
             "date": now.strftime("%Y-%m-%d"),
@@ -208,7 +299,7 @@ class Account:
 
     def today_out(self):
         """Total money that left this account today."""
-        today = date.today().isoformat()
+        today = today_ist().isoformat()
         total = 0.0
         for h in self.history:
             if h.get("date") == today and h.get("type") in MONEY_OUT:
@@ -231,6 +322,7 @@ class Account:
         return None
 
     # ---------- money operations (each returns (ok, message)) ----------
+    @locked
     def deposit(self, amount):
         amount = round(float(amount), 2)
         if self.status != "active":
@@ -243,6 +335,7 @@ class Account:
         ref = self._log("Deposit", amount)
         return True, f"Deposited {money(amount)} · Ref {ref}"
 
+    @locked
     def withdraw(self, amount):
         amount = round(float(amount), 2)
         error = self._debit_error(amount)
@@ -252,6 +345,7 @@ class Account:
         ref = self._log("Withdraw", amount)
         return True, f"Withdrew {money(amount)} · Ref {ref}"
 
+    @locked
     def send(self, other, amount, note=""):
         amount = round(float(amount), 2)
         if other.acc_no == self.acc_no:
@@ -284,7 +378,7 @@ class Bank:
         self.accounts = {}
         self.audit = []
         self.meta = {"admin_failed": 0, "admin_locked_until": 0.0,
-                     "last_interest_month": ""}
+                     "last_interest_month": "", "decoy_key": "", "retired": []}
         self.load()
 
     # ---------- file handling ----------
@@ -313,6 +407,7 @@ class Bank:
         if "accounts" in data:
             self.meta.update(data.get("meta", {}))
 
+    @locked
     def save(self):
         data = {
             "accounts": {no: a.to_dict() for no, a in self.accounts.items()},
@@ -322,11 +417,16 @@ class Bank:
         tmp = self.path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
+        try:
+            os.chmod(tmp, 0o600)       # only the app owner can read the data file
+        except OSError:
+            pass
         os.replace(tmp, self.path)     # safe write: never leaves a half file
 
+    @locked
     def log(self, who, event):
         self.audit.append({
-            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "time": now_ist().strftime("%Y-%m-%d %H:%M:%S"),
             "who": who,
             "event": event,
         })
@@ -337,25 +437,39 @@ class Bank:
         identifier = identifier.strip()
         if identifier in self.accounts:
             return self.accounts[identifier]
-        for acc in self.accounts.values():
+        for acc in list(self.accounts.values()):
             if acc.username and acc.username.lower() == identifier.lower():
                 return acc
         return None
 
     # ---------- create / delete ----------
+    @locked
     def create_account(self, name, username, acc_type, pin, confirm_pin, opening,
-                       question, answer):
+                       question, answer, dob=None, agreed=False):
         name = " ".join(name.split())
         username = username.strip()
         opening = round(float(opening), 2)
-        if len(name) < 2:
-            return False, "Please enter your full name", None
+        problem = name_error(name)
+        if problem:
+            return False, problem, None
+        # ---- age check: only 18+ can open an account ----
+        if not isinstance(dob, date):
+            return False, "Please enter your date of birth", None
+        if dob > today_ist() or calc_age(dob) > MAX_AGE:
+            return False, "Please enter a valid date of birth", None
+        if calc_age(dob) < MIN_AGE:
+            return False, f"You must be at least {MIN_AGE} years old to open an account", None
         if not re.fullmatch(r"[A-Za-z0-9_]{3,20}", username):
             return False, "Username must be 3-20 letters, digits or underscore", None
+        if username.isdigit():
+            return False, "Username cannot be only digits (it could look like an account number)", None
         if username.lower() == "admin" or self.find(username):
             return False, "This username is already taken", None
-        if not valid_pin(pin):
-            return False, "PIN must be 4 to 8 digits", None
+        if acc_type not in MIN_BALANCE:
+            return False, "Please choose an account type", None
+        problem = pin_error(pin)
+        if problem:
+            return False, problem, None
         if pin != confirm_pin:
             return False, "PINs do not match", None
         if question not in SECURITY_QUESTIONS:
@@ -365,13 +479,18 @@ class Bank:
         minimum = MIN_BALANCE[acc_type]
         if opening < minimum:
             return False, f"{acc_type} account needs at least {money(minimum)} to open", None
+        if opening > MAX_DEPOSIT:
+            return False, f"Maximum opening deposit is {money(MAX_DEPOSIT)}", None
+        if not agreed:
+            return False, f"Please tick the box to confirm you are {MIN_AGE}+ and the details are correct", None
 
+        retired = set(self.meta.get("retired", []))      # numbers of closed accounts are never reused
         while True:
-            acc_no = str(random.randint(10000000, 99999999))
-            if acc_no not in self.accounts:
+            acc_no = str(10000000 + secrets.randbelow(90000000))
+            if acc_no not in self.accounts and acc_no not in retired:
                 break
         acc = Account(acc_no, name, username, acc_type, "", "",
-                      created=datetime.now().strftime("%Y-%m-%d"))
+                      created=now_ist().strftime("%Y-%m-%d"), dob=dob.isoformat())
         acc.set_pin(pin)
         acc.set_security(question, answer)
         acc.balance = opening
@@ -382,13 +501,16 @@ class Bank:
         self.save()
         return True, "Account created", acc
 
+    @locked
     def delete_account(self, acc_no, who):
         acc = self.accounts.pop(acc_no, None)
         if acc:
+            self.meta.setdefault("retired", []).append(acc_no)
             self.log(who, f"Account {acc_no} ({acc.name}) deleted, balance {money(acc.balance)}")
             self.save()
 
     # ---------- login rules ----------
+    @locked
     def authenticate(self, identifier, pin):
         generic = "Incorrect username/account number or PIN"
         acc = self.find(identifier)
@@ -396,9 +518,12 @@ class Bank:
             return None, generic
         left = acc.lock_seconds_left()
         if left:
-            return None, f"Too many wrong attempts. Try again in {left // 60 + 1} minute(s)."
+            return None, f"Too many wrong attempts. Try again in {acc.lock_text()}."
         if acc.check_pin(pin):
             acc.unlock()
+            acc.prev_login = acc.last_login
+            acc.last_login = now_ist().strftime("%Y-%m-%d %H:%M")
+            self.log(acc.acc_no, "Logged in")
             self.save()
             return acc, ""
         locked = acc.register_failure()
@@ -406,14 +531,15 @@ class Bank:
             self.log("system", f"Account {acc.acc_no} locked after wrong PINs")
         self.save()
         if locked:
-            return None, "Too many wrong attempts. Account locked for 5 minutes."
+            return None, f"Too many wrong attempts. Account locked. Try again in {acc.lock_text()}."
         return None, generic
 
+    @locked
     def verify_pin(self, acc, pin):
         """Ask for the PIN again before money leaves the account. Wrong PINs count toward the lock."""
         left = acc.lock_seconds_left()
         if left:
-            return False, f"Too many wrong attempts. Try again in {left // 60 + 1} minute(s)."
+            return False, f"Too many wrong attempts. Try again in {acc.lock_text()}."
         if acc.check_pin(pin):
             acc.failed_attempts = 0
             return True, ""
@@ -422,9 +548,10 @@ class Bank:
             self.log("system", f"Account {acc.acc_no} locked after wrong PINs (payment)")
         self.save()
         if locked:
-            return False, "Too many wrong attempts. Account locked for 5 minutes."
+            return False, f"Too many wrong attempts. Account locked. Try again in {acc.lock_text()}."
         return False, "Incorrect PIN"
 
+    @locked
     def reset_pin_with_answer(self, identifier, answer, new_pin, confirm_pin):
         generic = "Details are incorrect. If you did not set a security question, contact the admin."
         acc = self.find(identifier)
@@ -432,17 +559,18 @@ class Bank:
             return False, generic
         left = acc.lock_seconds_left()
         if left:
-            return False, f"Too many wrong attempts. Try again in {left // 60 + 1} minute(s)."
+            return False, f"Too many wrong attempts. Try again in {acc.lock_text()}."
         if not acc.check_answer(answer):
             locked = acc.register_failure()
             if locked:
                 self.log("system", f"Account {acc.acc_no} locked after wrong security answers")
             self.save()
             if locked:
-                return False, "Too many wrong attempts. Account locked for 5 minutes."
+                return False, f"Too many wrong attempts. Account locked. Try again in {acc.lock_text()}."
             return False, generic
-        if not valid_pin(new_pin):
-            return False, "PIN must be 4 to 8 digits"
+        problem = pin_error(new_pin)
+        if problem:
+            return False, problem
         if new_pin != confirm_pin:
             return False, "PINs do not match"
         acc.set_pin(new_pin)
@@ -451,6 +579,19 @@ class Bank:
         self.save()
         return True, "PIN reset done. You can log in with your new PIN now."
 
+    @locked
+    def question_for(self, identifier):
+        acc = self.find(identifier)
+        if acc and acc.has_security():
+            return acc.sec_question
+        if not self.meta.get("decoy_key"):
+            self.meta["decoy_key"] = secrets.token_hex(16)
+            self.save()
+        digest = hmac.new(self.meta["decoy_key"].encode(), identifier.strip().lower().encode(),
+                          "sha256").digest()
+        return SECURITY_QUESTIONS[digest[0] % len(SECURITY_QUESTIONS)]
+
+    @locked
     def admin_login(self, password, real_password):
         if not real_password:
             return False, "Admin login is not set up"
@@ -477,8 +618,9 @@ class Bank:
             total += acc.balance
         return round(total, 2)
 
+    @locked
     def apply_interest(self):
-        month = datetime.now().strftime("%Y-%m")
+        month = now_ist().strftime("%Y-%m")
         if self.meta["last_interest_month"] == month:
             return False, "Interest for this month was already applied"
         count, total = 0, 0.0
@@ -500,6 +642,7 @@ class Bank:
             "meta": self.meta,
         }, indent=2)
 
+    @locked
     def restore_backup(self, text):
         try:
             data = json.loads(text)
@@ -776,9 +919,21 @@ def show_flash():
             getattr(st, item[0])(item[1])
 
 
-def logout():
+def clear_session():
+    """Forget everything about the user (balance toggle, receiver box ...) so the next person sees nothing."""
+    keep = ("splash_shown", "flash")
+    for key in list(st.session_state.keys()):
+        if key not in keep:
+            try:
+                del st.session_state[key]
+            except Exception:
+                pass
     st.session_state["user"] = None
     st.session_state["role"] = None
+
+
+def logout():
+    clear_session()
     st.rerun()
 
 
@@ -813,7 +968,8 @@ def rows_to_csv(rows):
     writer = csv.writer(buffer)
     writer.writerow(["Date", "Time", "Type", "Amount", "Balance", "Note", "Ref"])
     for r in rows:
-        writer.writerow([r["Date"], r["Time"], r["Type"], r["Amount"], r["Balance"], r["Note"], r["Ref"]])
+        writer.writerow([r["Date"], r["Time"], csv_safe(r["Type"]), r["Amount"], r["Balance"],
+                         csv_safe(r["Note"]), csv_safe(r["Ref"])])
     return buffer.getvalue()
 
 
@@ -834,7 +990,7 @@ def statement_pdf(acc, rows, start, end):
         ("N", 10, f"Holder   : {clean(acc.name)}"),
         ("N", 10, f"Account  : {acc.acc_no}  ({clean(acc.acc_type)})"),
         ("N", 10, f"Period   : {start}  to  {end}"),
-        ("N", 10, f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}"),
+        ("N", 10, f"Generated: {now_ist().strftime('%Y-%m-%d %H:%M')} IST"),
         ("N", 10, ""),
         ("B", 9, f"{'Date':<10} {'Time':<8} {'Type':<13} {'Amount':>12} {'Balance':>12} {'Ref':<11} Note"),
         ("N", 9, "-" * 94),
@@ -920,7 +1076,11 @@ def login_page(bank):
 
     with tab_create:
         with st.form("create_form"):
-            name = st.text_input("Full name*")
+            name = st.text_input("Full name*", max_chars=50)
+            dob = st.date_input(
+                f"Date of birth* (only {MIN_AGE}+ can open an account)",
+                value=date(2000, 1, 1), min_value=date(1900, 1, 1), max_value=today_ist(),
+            )
             username = st.text_input("Username* (3-20 letters, digits or _)")
             acc_type = st.selectbox("Account type", ["Savings", "Current"])
             new_pin = st.text_input("PIN (4-8 digits)*", type="password")
@@ -928,14 +1088,19 @@ def login_page(bank):
             question = st.selectbox("Security question (for forgot PIN)", SECURITY_QUESTIONS)
             answer = st.text_input("Security answer*")
             opening = st.number_input("Opening deposit", min_value=0.0, step=100.0)
+            agreed = st.checkbox(
+                f"I confirm that I am {MIN_AGE} years or older and all details above are correct"
+            )
             go = st.form_submit_button("Create account")
         st.caption(
             f"Savings: minimum opening deposit and balance {money(MIN_BALANCE['Savings'])}, "
-            f"earns {INTEREST_RATE}% yearly interest. Current: no minimum."
+            f"earns {INTEREST_RATE}% yearly interest. Current: no minimum. "
+            f"Only people aged {MIN_AGE} or above can open an account."
         )
         if go:
             ok, message, acc = bank.create_account(
-                name, username, acc_type, new_pin, confirm_pin, opening, question, answer
+                name, username, acc_type, new_pin, confirm_pin, opening, question, answer,
+                dob=dob, agreed=agreed,
             )
             if ok:
                 st.success(f"Account created! Account number: {acc.acc_no}")
@@ -948,13 +1113,9 @@ def login_page(bank):
         if st.session_state.pop("clear_forgot", False):
             st.session_state["forgot_id"] = ""
         forgot_id = st.text_input("Username or account number", key="forgot_id").strip()
-        target = bank.find(forgot_id) if forgot_id else None
         if forgot_id:
-            if target and target.has_security():
-                st.info(f"Security question: {target.sec_question}")
-            else:
-                st.warning("Account not found, or no security question was set. "
-                           "Please contact the admin to reset your PIN.")
+            st.info(f"Security question: {bank.question_for(forgot_id)}")
+            st.caption("No security question set on your account? Contact the admin to reset your PIN.")
         with st.form("forgot_form"):
             answer = st.text_input("Your answer")
             new_pin = st.text_input("New PIN (4-8 digits)", type="password")
@@ -992,7 +1153,7 @@ def month_totals(rows):
 
 def user_page(bank, acc):
     c1, c2 = st.columns([3, 1])
-    c1.subheader(f"Welcome back, {acc.name} 👋")
+    c1.subheader(f"Welcome back, {md_safe(acc.name)} 👋")
     if c2.button("Logout"):
         logout()
 
@@ -1003,6 +1164,8 @@ def user_page(bank, acc):
         hide = st.toggle("🙈 Hide balance", key="hide_balance")
     balance_card(acc, hide)
     st.caption(f"Username: {acc.username or '-'}")
+    if acc.prev_login:
+        st.caption(f"Last login: {acc.prev_login} IST. If this was not you, change your PIN now.")
     if acc.acc_type == "Savings":
         estimate = round(acc.balance * INTEREST_RATE / 100 / 12, 2)
         st.caption(f"📈 Earns {INTEREST_RATE}% a year. Estimated interest next month: {money(estimate)}")
@@ -1022,7 +1185,10 @@ def user_page(bank, acc):
             amount = st.number_input("Amount", min_value=0.0, max_value=MAX_DEPOSIT, step=100.0)
             go = st.form_submit_button("Deposit")
         if go:
-            finish(bank, acc.deposit(amount))
+            result = acc.deposit(amount)
+            if result[0]:
+                bank.log(acc.acc_no, result[1])
+            finish(bank, result)
 
     with tab_wd:
         with st.form("withdraw_form", clear_on_submit=True):
@@ -1032,7 +1198,10 @@ def user_page(bank, acc):
         if go:
             ok, error = bank.verify_pin(acc, pin)
             if ok:
-                finish(bank, acc.withdraw(amount))
+                result = acc.withdraw(amount)
+                if result[0]:
+                    bank.log(acc.acc_no, result[1])
+                finish(bank, result)
             else:
                 st.error(error)
 
@@ -1057,7 +1226,7 @@ def user_page(bank, acc):
             elif receiver.acc_no == acc.acc_no:
                 st.warning("You cannot transfer to your own account")
             else:
-                st.info(f"Receiver: {receiver.name}")
+                st.info(f"Receiver: {md_safe(receiver.name)}")
         with st.form("transfer_form", clear_on_submit=True):
             amount = st.number_input("Amount", min_value=0.0, step=100.0)
             note = st.text_input("Note (optional)", max_chars=60)
@@ -1072,15 +1241,16 @@ def user_page(bank, acc):
                 if not ok:
                     st.error(error)
                 else:
-                    result = acc.send(receiver, amount, note.strip())
+                    result = acc.send(receiver, amount, clean_note(note))
                     if result[0]:
+                        bank.log(acc.acc_no, result[1])
                         st.session_state["clear_transfer"] = True
                         if save_payee and receiver.acc_no not in acc.payees:
                             acc.payees.append(receiver.acc_no)
                     finish(bank, result)
 
     with tab_st:
-        today = date.today()
+        today = today_ist()
         first = min((h.get("date", today.isoformat()) for h in acc.history), default=today.isoformat())
         try:
             first_day = date.fromisoformat(first)
@@ -1131,11 +1301,15 @@ def user_page(bank, acc):
             st.info("No transactions for these filters.")
 
     with tab_pf:
-        st.write(f"**Name:** {acc.name}")
+        st.write(f"**Name:** {md_safe(acc.name)}")
         st.write(f"**Username:** {acc.username or '-'}")
         st.write(f"**Account number:** {acc.acc_no}")
         st.write(f"**Account type:** {acc.acc_type}")
         st.write(f"**Opened on:** {acc.created or '-'}")
+        try:
+            st.write(f"**Age:** {calc_age(date.fromisoformat(acc.dob))}")
+        except ValueError:      # old accounts have no date of birth
+            pass
         st.write(f"**Status:** {acc.status.title()}")
 
         saved = [no for no in acc.payees if no in bank.accounts]
@@ -1157,8 +1331,10 @@ def user_page(bank, acc):
         if go:
             if not acc.check_pin(old_pin):
                 st.error("Current PIN is incorrect")
-            elif not valid_pin(new_pin):
-                st.error("PIN must be 4 to 8 digits")
+            elif pin_error(new_pin):
+                st.error(pin_error(new_pin))
+            elif new_pin == old_pin:
+                st.error("New PIN must be different from the current PIN")
             elif new_pin != confirm:
                 st.error("New PINs do not match")
             else:
@@ -1196,14 +1372,15 @@ def user_page(bank, acc):
             sure = st.checkbox("Yes, close my account")
             go = st.form_submit_button("Close my account")
         if go:
-            if not sure:
+            if acc.status != "active":
+                st.error("A frozen account cannot be closed. Please contact the admin.")
+            elif not sure:
                 st.error("Please tick the checkbox first")
             elif not acc.check_pin(pin_check):
                 st.error("Incorrect PIN")
             else:
                 bank.delete_account(acc.acc_no, acc.acc_no)
-                st.session_state["user"] = None
-                st.session_state["role"] = None
+                clear_session()
                 flash("success", "Your account has been closed")
                 st.rerun()
 
@@ -1213,6 +1390,9 @@ def admin_page(bank):
     c1.subheader("🛡️ Admin Console")
     if c2.button("Logout"):
         logout()
+    admin_pw = get_admin_password()
+    if admin_pw and len(admin_pw) < 10:
+        st.warning("Your ADMIN_PASSWORD is short. Use at least 10 characters (letters + digits + symbols).")
 
     tab_dash, tab_acc, tab_int, tab_audit, tab_bk = st.tabs(
         ["Dashboard", "Accounts", "Interest", "Audit log", "Backup"]
@@ -1269,7 +1449,7 @@ def admin_page(bank):
                     format_func=lambda no: f"{no} - {bank.accounts[no].name}",
                 )
                 acc = bank.accounts[target]
-                st.write(f"**{acc.name}**  |  {acc.acc_type}  |  {money(acc.balance)}  |  {acc.status}")
+                st.write(f"**{md_safe(acc.name)}**  |  {acc.acc_type}  |  {money(acc.balance)}  |  {acc.status}")
 
                 with st.expander("Transaction history"):
                     if acc.history:
@@ -1292,13 +1472,13 @@ def admin_page(bank):
                     temp_pin = st.text_input("New PIN for this user (4-8 digits)", type="password")
                     go = st.form_submit_button("Reset PIN")
                 if go:
-                    if valid_pin(temp_pin):
+                    if not pin_error(temp_pin):
                         acc.set_pin(temp_pin)
                         acc.unlock()
                         bank.log("admin", f"PIN reset for account {acc.acc_no}")
                         finish(bank, (True, "PIN reset done"))
                     else:
-                        st.error("PIN must be 4 to 8 digits")
+                        st.error(pin_error(temp_pin))
 
                 sure = st.checkbox("Yes, I want to delete this account", key="admin_delete_ok")
                 if st.button("Delete account", type="primary"):
@@ -1321,7 +1501,8 @@ def admin_page(bank):
             st.write("No events yet.")
 
     with tab_bk:
-        st.write("Streamlit Cloud can reset files when the app restarts, so download a backup regularly.")
+        st.write("Streamlit Cloud can reset files when the app restarts, so download a backup regularly. "
+                 "The backup holds all account data, so keep it private.")
         st.download_button("Download backup", bank.export_backup(),
                            file_name="bank_backup.json", mime="application/json")
         uploaded = st.file_uploader("Restore from backup file", type=["json"])
@@ -1338,6 +1519,19 @@ def admin_page(bank):
 # =====================================================================
 #                                MAIN
 # =====================================================================
+def get_bank():
+    """One shared Bank for all visitors, so two users never overwrite each other's changes."""
+    if hasattr(st, "cache_resource"):
+        return _shared_bank()
+    return Bank()
+
+
+if hasattr(st, "cache_resource"):
+    @st.cache_resource
+    def _shared_bank():
+        return Bank()
+
+
 def main():
     st.set_page_config(page_title="NovaVault Bank", page_icon="💠")
     if "user" not in st.session_state:
@@ -1353,7 +1547,7 @@ def main():
             logout()
         st.session_state["last_active"] = now
 
-    bank = Bank()
+    bank = get_bank()
     inject_css()
     render_header(st.session_state["user"] is not None)
     show_flash()
