@@ -831,7 +831,7 @@ SPLASH_HTML = (
 
 HERO_HTML = (
     '<div class="nv-hero">'
-    '<span class="nv-float f1">🪙</span><span class="nv-float f2">💎</span>'
+    '<span class="nv-float f1">💳</span><span class="nv-float f2">💎</span>'
     '<span class="nv-float f3">💰</span><span class="nv-float f4">🔐</span>'
     '<div class="nv-badge">SECURE &bull; INSTANT &bull; SMART</div>'
     '<div class="nv-title">Nova<span>Vault</span></div>'
